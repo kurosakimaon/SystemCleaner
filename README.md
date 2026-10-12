@@ -62,7 +62,7 @@ msbuild SystemCleaner.sln /p:Configuration=Release /p:Platform=x64 /m
 
 测试用例清单与执行记录见 [tests/TEST_CASES.md](tests/TEST_CASES.md)。
 
-> 注意：`tests/*.cmd` 中 `vcvars64.bat` 的路径为本机 Visual Studio 安装路径，换机器使用请先改成自己的安装路径（或直接在 Developer Prompt 中运行并删除 `call` 行）。
+> 说明：脚本会通过 `vswhere` 自动定位 Visual Studio 安装路径；如探测失败，可设置环境变量 `VS_VCVARS` 指向自己的 `vcvars64.bat`。
 >
 > `tests/unit_tests.cpp` 是早期草稿，未纳入编译，仅作参考。
 
@@ -79,4 +79,4 @@ msbuild SystemCleaner.sln /p:Configuration=Release /p:Platform=x64 /m
 
 ## License
 
-未附带许可证文件。如需开源许可，请自行添加（如 MIT / GPL）。
+[MIT](LICENSE)
