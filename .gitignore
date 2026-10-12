@@ -1,0 +1,30 @@
+# Visual Studio / MSBuild 构建产物
+.vs/
+Debug/
+Release/
+x64/
+x86/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.idb
+*.iobj
+*.ipdb
+*.exp
+*.lib
+*.res
+*.tlog/
+*.recipe
+*.FileListAbsolute.txt
+*.log
+*.json.command
+*.dt.d.json
+*.dt.module.json
+
+# 用户本地配置
+*.user
+
+# 测试输出
+tests/bin/
+tests/*.txt
