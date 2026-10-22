@@ -2,12 +2,13 @@
 
 > 自测方式：
 > - **UT**：`tests/baseline_tests.cpp`（控制台工程，直接包含 `utils.cpp` 被测源码，可自动化运行，336 项断言）
-> - **GUI**：`tests/gui_tests.cpp`（控制台宿主进程，真实创建主窗口，驱动 Tab 显隐矩阵、按钮命令流转、`WM_*_DONE` 64 位消息解析、网络测速完整流程、强力卸载护栏、注册表清理护栏等交互，839 项断言）。编译期用宏把 `MessageBoxW` 替换为桩函数消除模态阻塞，可在非提升环境自动化运行。
+> - **FUNC**：`tests/functional_tests.cpp`（真实文件系统 / HKCU 注册表 / 进程与快捷方式行为测试，246 项断言，测试数据自动清理）
+> - **GUI**：`tests/gui_tests.cpp`（控制台宿主进程，真实创建主窗口，驱动 Tab 显隐矩阵、按钮命令流转、`WM_*_DONE` 64 位消息解析、网络测速完整流程、强力卸载护栏、注册表清理护栏等交互，1126 项断言）。编译期用宏把 `MessageBoxW` 替换为桩函数消除模态阻塞，可在非提升环境自动化运行。
 > - **静态**：源码走查 + 编译诊断（发现即修复）
 > - **UI**：需管理员权限手工验证的破坏性操作（真正卸载/清理/粉碎），标注为 `MANUAL`
 >
 > 编译验证：Release|x64、Release|Win32、Debug|x64、Debug|Win32 四个配置全部 0 error。
-> 自动化回归：`baseline_tests.exe` → **Total: 336  Failed: 0**；`gui_tests.exe` → **Total: 839  Failed: 0**
+> 自动化回归：`baseline_tests.exe` → **Total: 336  Failed: 0**；`functional_tests.exe` → **Total: 246  Failed: 0**；`gui_tests.exe` → **Total: 1126  Failed: 0**
 
 ## 1. 安全护栏（最高优先级 —— 误删系统文件即致命）
 
@@ -205,8 +206,9 @@
 | BLD-02 | Release \| Win32 | 0 error | 编译 | ✅ `Release\SystemCleaner.exe` |
 | BLD-03 | Debug \| x64 | 0 error | 编译 | ✅ `x64\Debug\SystemCleaner.exe` |
 | BLD-04 | Debug \| Win32 | 0 error | 编译 | ✅ `Debug\SystemCleaner.exe` |
-| BLD-05 | `baseline_tests.exe` 自动化回归 | Failed = 0 | UT | ✅ Total 273 / Failed 0 |
-| BLD-06 | `gui_tests.exe` GUI 交互自动化回归 | Failed = 0 | GUI | ✅ Total 823 / Failed 0 |
+| BLD-05 | `baseline_tests.exe` 自动化回归 | Failed = 0 | UT | ✅ Total 336 / Failed 0 |
+| BLD-06 | `gui_tests.exe` GUI 交互自动化回归 | Failed = 0 | GUI | ✅ Total 1126 / Failed 0 |
+| BLD-07 | `functional_tests.exe` 功能行为回归 | Failed = 0 | FUNC | ✅ Total 246 / Failed 0 |
 
 ## 11. GUI 交互自动化（`gui_tests.exe`，真实窗口驱动）
 
@@ -332,4 +334,3 @@
 |---|---|
 | GUI 交互验证 | Tab 显隐矩阵、按钮命令流转、`WM_*_DONE` 64 位消息解析、勾选状态同步、工具页控件切换等**交互逻辑**已由 `gui_tests.exe` 在真实窗口上自动化覆盖（见第 11 节），无需手工点击。 |
 | 破坏性操作 | 真正执行卸载 / 清理 / 文件粉碎 / 一键网络修复 / Hosts 写回 会改动系统，程序清单 `requireAdministrator`，当前非提升环境不执行；这些路径的**确认前逻辑**已由 GUI 测试覆盖（桩使确认框返回取消），**确认后效果**建议在提升后的桌面环境手工验证（MSG、SCAN-07/08/09 等）。 |
-| `tests/unit_tests.cpp` | 早期草稿，引用了不存在的 API，未纳入编译；有效断言已全部迁移到 `baseline_tests.cpp`。 |

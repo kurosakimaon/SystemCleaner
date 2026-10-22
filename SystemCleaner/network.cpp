@@ -504,7 +504,18 @@ std::wstring ReadHostsFile() {
 
     delete[] buf;
     delete[] wBuf;
-    return result;
+
+    // 多行 EDIT 只认 CRLF：Unix 风格换行的 hosts 会挤成一行
+    std::wstring normalized;
+    normalized.reserve(result.size() + 16);
+    for (size_t i = 0; i < result.size(); ++i) {
+        if (result[i] == L'\n' && (i == 0 || result[i - 1] != L'\r')) {
+            normalized += L"\r\n";
+        } else {
+            normalized += result[i];
+        }
+    }
+    return normalized;
 }
 
 /**

@@ -30,6 +30,9 @@
     <ClInclude Include="SystemCleaner.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="ui_theme.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="cleaner.cpp">
@@ -51,6 +54,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="tools.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="ui_theme.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="uninstaller.cpp">

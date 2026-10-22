@@ -152,6 +152,7 @@
     <ClInclude Include="Resource.h" />
     <ClInclude Include="SystemCleaner.h" />
     <ClInclude Include="targetver.h" />
+    <ClInclude Include="ui_theme.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="cleaner.cpp" />
@@ -161,6 +162,7 @@
     <ClCompile Include="startup.cpp" />
     <ClCompile Include="SystemCleaner.cpp" />
     <ClCompile Include="tools.cpp" />
+    <ClCompile Include="ui_theme.cpp" />
     <ClCompile Include="uninstaller.cpp" />
     <ClCompile Include="utils.cpp" />
   </ItemGroup>

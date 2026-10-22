@@ -52,19 +52,19 @@ msbuild SystemCleaner.sln /p:Configuration=Release /p:Platform=x64 /m
 
 ## 测试
 
-`tests/` 目录包含两套自测程序（无需第三方测试框架）：
+`tests/` 目录包含三套自测程序（无需第三方测试框架）：
 
 | 脚本 | 内容 |
 | --- | --- |
 | `build_baseline.cmd` | 编译并运行 `baseline_tests.cpp`，336 项基础逻辑断言 |
-| `build_gui.cmd` | 编译并运行 `gui_tests.cpp`，839 项 GUI 交互断言（控制台子系统，非提权运行） |
+| `build_functional.cmd` | 编译并运行 `functional_tests.cpp`，246 项真实文件系统 / 注册表 / 进程行为断言 |
+| `build_gui.cmd` | 编译并运行 `gui_tests.cpp`，1126 项 GUI 交互断言（控制台子系统，非提权运行） |
+| `build_icon.cmd` | 用 `icon_gen.cs` 重新生成应用图标 |
 | `build_app.cmd <配置> <平台>` | 用 msbuild 编译主工程，例如 `build_app.cmd Release x64` |
 
 测试用例清单与执行记录见 [tests/TEST_CASES.md](tests/TEST_CASES.md)。
 
 > 说明：脚本会通过 `vswhere` 自动定位 Visual Studio 安装路径；如探测失败，可设置环境变量 `VS_VCVARS` 指向自己的 `vcvars64.bat`。
->
-> `tests/unit_tests.cpp` 是早期草稿，未纳入编译，仅作参考。
 
 ## 安全设计
 

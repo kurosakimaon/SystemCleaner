@@ -657,15 +657,28 @@ void ScanInstalledDrivers() {
             std::wstring displayName = RegReadString(hSubKey, L"DisplayName");
             DWORD startType = 0;
             DWORD startSize = sizeof(startType);
-            if (RegQueryValueExW(hSubKey, L"Start", NULL, NULL, (LPBYTE)&startType, &startSize) == ERROR_SUCCESS) {
-                if (startType == 2 || startType == 3) {
+            DWORD serviceType = 0;
+            DWORD typeSize = sizeof(serviceType);
+            BOOL startOk = RegQueryValueExW(hSubKey, L"Start", NULL, NULL,
+                (LPBYTE)&startType, &startSize) == ERROR_SUCCESS;
+            BOOL typeOk = RegQueryValueExW(hSubKey, L"Type", NULL, NULL,
+                (LPBYTE)&serviceType, &typeSize) == ERROR_SUCCESS;
+
+            // 驱动页只应列内核/文件系统驱动。仅看 Start=2/3 会把 Winmgmt、
+            // Spooler 等用户态自动服务也当成驱动，允许“强删驱动”就可能删掉系统服务
+            if (startOk && typeOk && (startType == 2 || startType == 3) &&
+                (serviceType & SERVICE_DRIVER) != 0) {
+                std::wstring imagePath = RegReadString(hSubKey, L"ImagePath");
+                // 无 ImagePath 的是内核内置驱动（Ntfs/Fastfat 等），删其服务键必然
+                // 破坏系统且无法清理文件，不应出现在可卸载列表里
+                if (!imagePath.empty()) {
                     UninstallItem item;
                     item.displayName = displayName.empty() ? std::wstring(keyName) : displayName;
                     item.publisher = L"系统驱动";
                     item.version = L"";
                     // ImagePath 是 .sys 文件而不是目录：绝不能写进 installLocation，
                     // 否则 CleanAppResiduals 会把它当目录递归删除、并按目录前缀杀进程/删服务
-                    item.imagePath = RegReadString(hSubKey, L"ImagePath");
+                    item.imagePath = imagePath;
                     item.uninstallString = L"";
                     item.regKeyPath = std::wstring(L"SYSTEM\\CurrentControlSet\\Services\\") + keyName;
                     item.regHive = HKEY_LOCAL_MACHINE;

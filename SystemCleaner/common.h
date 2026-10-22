@@ -21,12 +21,15 @@
 #include <cstring>
 #include <cwctype>
 
+#pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "psapi.lib")
+
+#include "ui_theme.h"
 
 // Fallback macros for ListView item data access (may not be defined in older SDK headers)
 #ifndef LVM_GETITEMDATA
@@ -102,10 +105,15 @@ struct StartupItem {
     std::wstring realName;
     std::wstring path;
     std::wstring location;
-    HKEY hive;
+    HKEY hive = NULL;
     std::wstring subKey;
-    bool isRegistry;
-    bool isEnabled;
+    bool isRegistry = false;
+    bool isEnabled = true;
+    // 扫描时使用的注册表视图。32 位启动项（HKLM\Software\WOW6432Node\...\Run）
+    // 必须用同一视图打开才能禁用/恢复；用 64 位视图会找不到该值
+    REGSAM view = 0;
+    // 该项已从 RunOnce/策略键移入本程序备份区，恢复时必须写回原位置
+    bool isBackedUp = false;
 };
 
 // Right-click menu item structure
@@ -114,9 +122,11 @@ struct RightMenuItem {
     std::wstring realKeyName;
     std::wstring type;
     std::wstring location;
-    HKEY hive;
+    HKEY hive = NULL;
     std::wstring parentPath;
-    bool isEnabled;
+    bool isEnabled = true;
+    // HKCR 的 32 位视图与 64 位视图是两套独立注册，必须按扫描时的视图操作
+    REGSAM view = 0;
 };
 
 // Registry clean item structure
@@ -331,14 +341,15 @@ DWORD WINAPI CleanThreadProc(LPVOID lpParam);
 
 // startup.cpp
 void LoadRegistryStartup(HKEY hive, const std::wstring& subKey, const std::wstring& locationName, REGSAM viewFlag);
-void LoadFolderStartup(const std::wstring& folderPath, const std::wstring& locationName);
+void LoadFolderStartup(const std::wstring& folderPath, const std::wstring& locationName, HKEY hive);
 void ScanAllStartupItems();
 void RefreshStartupList();
+bool StartupTargetExists(const StartupItem& item);
 bool DisableStartupItem(const StartupItem& item);
 bool EnableStartupItem(const StartupItem& item);
 
 // contextmenu.cpp
-void ScanContextMenuReg(HKEY hive, const std::wstring& basePath, const std::wstring& typeName);
+void ScanContextMenuReg(HKEY hive, const std::wstring& basePath, const std::wstring& typeName, REGSAM viewFlag = 0);
 void ScanAllContextMenus();
 void RefreshContextMenuList();
 bool DisableContextMenuItem(const RightMenuItem& item);
@@ -357,7 +368,7 @@ void NetworkRepairAll();
 // registry.cpp
 bool ShredFile(const std::wstring& filePath);
 void ScanUninstallView(REGSAM viewFlag, const wchar_t* viewName);
-void ScanStartupValueView(HKEY hive, const wchar_t* subKey, const wchar_t* viewName);
+void ScanStartupValueView(HKEY hive, const wchar_t* subKey, const wchar_t* viewName, REGSAM viewFlag = 0);
 void ScanUninstallLeftovers();
 DWORD WINAPI RegScanThreadProc(LPVOID lpParam);
 void RefreshRegCleanList();

@@ -23,5 +23,5 @@ cl /nologo /EHsc /std:c++20 /utf-8 /MD /W3 /D_CRT_SECURE_NO_WARNINGS /DUNICODE /
    gui_tests.cpp ^
    /link /SUBSYSTEM:CONSOLE ^
    shell32.lib ole32.lib uuid.lib advapi32.lib shlwapi.lib user32.lib ^
-   comctl32.lib comdlg32.lib shcore.lib wininet.lib
+   comctl32.lib comdlg32.lib shcore.lib wininet.lib gdi32.lib
 if errorlevel 1 exit /b 1

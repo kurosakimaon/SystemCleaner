@@ -47,6 +47,7 @@ static int TestMessageBoxStub(LPCWSTR text) {
 #include "../SystemCleaner/network.cpp"
 #include "../SystemCleaner/uninstaller.cpp"
 #include "../SystemCleaner/tools.cpp"
+#include "../SystemCleaner/ui_theme.cpp"
 
 // ====================== 断言框架 ======================
 
@@ -1011,6 +1012,344 @@ static void Test_RegCleanGuards() {
     SwitchTab(0);
 }
 
+// ====================== 布局 / DPI ======================
+
+static void MapRectToTab(RECT& r) {
+    POINT pts[2] = { { r.left, r.top }, { r.right, r.bottom } };
+    MapWindowPoints(NULL, g_hTab, pts, 2);
+    r.left = pts[0].x; r.top = pts[0].y;
+    r.right = pts[1].x; r.bottom = pts[1].y;
+}
+
+// 当前页所有可见控件必须完整落在 TabCtrl_AdjustRect 给出的页面矩形内，
+// 且尺寸不能为零：这是最小窗口尺寸下最容易出问题的地方
+static void CheckChildBounds(const char* label, int page) {
+    RECT pageRect;
+    GetClientRect(g_hTab, &pageRect);
+    TabCtrl_AdjustRect(g_hTab, FALSE, &pageRect);
+
+    int visible = 0;
+    for (HWND c = GetWindow(g_hTab, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) {
+        if (!IsWindowVisible(c)) continue;
+        RECT r;
+        if (!GetWindowRect(c, &r)) continue;
+        MapRectToTab(r);
+        visible++;
+        bool nonEmpty = r.right > r.left && r.bottom > r.top;
+        bool inside = r.left >= pageRect.left - 2 && r.top >= pageRect.top - 2 &&
+                      r.right <= pageRect.right + 2 && r.bottom <= pageRect.bottom + 2;
+        ++g_total;
+        if (!nonEmpty || !inside) {
+            ++g_failed;
+            printf("  [FAIL] %s page=%d ctrl=%d rect=(%ld,%ld,%ld,%ld) page=(%ld,%ld,%ld,%ld)\n",
+                label, page, GetDlgCtrlID(c), r.left, r.top, r.right, r.bottom,
+                pageRect.left, pageRect.top, pageRect.right, pageRect.bottom);
+        }
+    }
+    CHECK_MSG(visible > 0, "每个页面在布局后都应有可见控件");
+}
+
+static void CheckLayout(HWND hWnd, int outerW, int outerH, const char* label) {
+    // 窗口在屏幕外长期停留时可能被系统最小化：最小化窗口的客户区为 0，
+    // 会误报布局失败，因此先恢复正常状态再改尺寸
+    ShowWindow(hWnd, SW_RESTORE);
+    SetWindowPos(hWnd, NULL, -32000, -32000, outerW, outerH,
+        SWP_NOZORDER | SWP_NOACTIVATE);
+    PumpMessages(180);
+
+    RECT client;
+    GetClientRect(hWnd, &client);
+    CHECK_MSG(client.right > 0 && client.bottom > 0, "主窗口应有有效客户区");
+
+    RECT tab;
+    GetWindowRect(g_hTab, &tab);
+    MapWindowPoints(NULL, hWnd, (POINT*)&tab, 2);
+    CHECK_MSG(tab.left >= 0 && tab.top >= 0, "页签不得超出客户区左上角");
+    CHECK_MSG(tab.right <= client.right && tab.bottom <= client.bottom,
+        "页签不得超出客户区右下角");
+
+    RECT side;
+    GetWindowRect(g_hSidebar, &side);
+    MapWindowPoints(NULL, hWnd, (POINT*)&side, 2);
+    int sideW = side.right - side.left;
+    int expectedSide = UiScale(client.right < UiScale(1160) ? 72 : 214);
+    CHECK_MSG(sideW == expectedSide, "侧边栏宽度应随窗口宽度切换展开/紧凑");
+    CHECK_MSG(tab.left >= side.right, "页签不得与侧边栏重叠");
+    CHECK_MSG(tab.left == side.right + UiScale(28), "页签左边距应等于内容边距");
+
+    RECT status;
+    GetWindowRect(g_hStatusText, &status);
+    MapWindowPoints(NULL, hWnd, (POINT*)&status, 2);
+    CHECK_MSG(status.left >= 0 && status.right <= client.right &&
+              status.top >= 0 && status.bottom <= client.bottom,
+        "状态栏文字必须位于客户区内");
+    CHECK_MSG(status.top >= tab.bottom, "状态栏不得与页签区域重叠");
+    CHECK_MSG(status.right > status.left, "状态栏文字应有有效宽度");
+
+    for (int page = 0; page < 7; page++) {
+        SwitchTab(page);
+        PumpMessages(40);
+        CheckChildBounds(label, page);
+    }
+    SwitchTab(0);
+    PumpMessages(40);
+}
+
+// GUI-STATUSBK：状态栏/测速结果等动态文本控件必须用实心背景擦除旧文字，
+// 否则 WM_SETTEXT 后新旧文本会重叠（用户可见的乱码）。
+static void Test_DynamicTextBackground() {
+    GROUP("GUI-STATUSBK 动态文本背景擦除");
+
+    HDC dc = CreateCompatibleDC(NULL);
+    CHECK_MSG(dc != NULL, "应能创建内存 DC");
+
+    struct Case {
+        HWND ctl;
+        COLORREF expectedBg;
+        const wchar_t* name;
+    };
+    const Case cases[] = {
+        { g_hStatusText, RGB(244, 246, 250), L"状态栏" },
+        { g_hSpeedResult, RGB(255, 255, 255), L"测速结果" },
+        { g_hToolInfoLabel, RGB(244, 246, 250), L"工具提示" },
+    };
+
+    for (const Case& c : cases) {
+        CHECK_MSG(c.ctl && IsWindow(c.ctl), "动态文本控件应已创建");
+        if (!c.ctl) continue;
+
+        HBRUSH brush = (HBRUSH)SendMessageW(g_hMainWnd, WM_CTLCOLORSTATIC,
+            (WPARAM)dc, (LPARAM)c.ctl);
+        ++g_total;
+        if (!brush || brush == (HBRUSH)GetStockObject(HOLLOW_BRUSH)) {
+            ++g_failed;
+            printf("  [FAIL] %ls 不得返回空画刷（透明背景会残留旧文字）\n", c.name);
+            continue;
+        }
+
+        LOGBRUSH lb = {};
+        CHECK_MSG(GetObjectW(brush, sizeof(lb), &lb) == sizeof(lb) && lb.lbStyle == BS_SOLID,
+            "动态文本背景必须是实心画刷");
+        CHECK_MSG(lb.lbColor == c.expectedBg, "动态文本背景色必须与所在区域底色一致");
+        CHECK_MSG(GetBkMode(dc) == OPAQUE, "动态文本必须使用不透明背景");
+        CHECK_MSG(GetBkColor(dc) == c.expectedBg, "不透明背景色必须与实心画刷一致");
+    }
+
+    DeleteDC(dc);
+}
+
+// GUI-TOOLPOLISH：实用工具页工具栏的三个用户反馈点
+//   1) 原生下拉框是灰色 3D 外观，与蓝色主题格格不入；
+//   2) 单行 EDIT 的文字贴顶，34px 输入框里显得别扭；
+//   3) 两行工具栏里 26px 下拉框、34px 按钮、18px 提示文字各按各的顶边对齐。
+static int CenterY(const RECT& rc) { return (rc.top + rc.bottom) / 2; }
+
+static void Test_ToolsToolbarPolish() {
+    GROUP("GUI-TOOLPOLISH 工具页工具栏样式");
+
+    SwitchTab(6);
+    SwitchToolFunction(0);
+    PumpMessages(80);
+
+    // --- 下拉框必须自绘成白色圆角，而不是系统灰 ---
+    RECT comboClient, comboWindow;
+    GetClientRect(g_hToolFuncCombo, &comboClient);
+    GetWindowRect(g_hToolFuncCombo, &comboWindow);
+    int cw = comboClient.right, ch = comboClient.bottom;
+    printf("  [info] 下拉框 window=%ldx%ld client=%ldx%ld\n",
+        (long)(comboWindow.right - comboWindow.left),
+        (long)(comboWindow.bottom - comboWindow.top), (long)cw, (long)ch);
+    CHECK_MSG(cw > 0 && ch > 0, "功能下拉框应有有效尺寸");
+
+    HDC screen = GetDC(NULL);
+    HDC mem = CreateCompatibleDC(screen);
+    HBITMAP bmp = CreateCompatibleBitmap(screen, cw, ch);
+    HGDIOBJ oldBmp = SelectObject(mem, bmp);
+    RECT all = { 0, 0, cw, ch };
+    HBRUSH sentinel = CreateSolidBrush(RGB(255, 0, 255));
+    FillRect(mem, &all, sentinel);
+    DeleteObject(sentinel);
+    SendMessageW(g_hToolFuncCombo, WM_PRINTCLIENT, (WPARAM)mem, PRF_CLIENT);
+
+    // 取文字与箭头之间的空白处：原生下拉框这里是系统按钮灰，不是纯白
+    COLORREF comboBg = GetPixel(mem, cw - UiScale(42), ch / 2);
+    CHECK_MSG(comboBg == RGB(255, 255, 255), "下拉框应为白色自绘背景，而不是系统灰色");
+    CHECK_MSG(GetPixel(mem, 2, ch / 2) != RGB(255, 0, 255),
+        "下拉框必须响应 WM_PRINTCLIENT 自绘（否则会是哨兵色）");
+
+    // 圆角外侧必须是页面底色；整块涂白会在四角留下白色方块（用户可见的“丑角”）
+    const POINT comboCorners[] = {
+        { 1, 1 }, { cw - 2, 1 }, { 1, ch - 2 }, { cw - 2, ch - 2 } };
+    for (const POINT& pt : comboCorners) {
+        CHECK_MSG(GetPixel(mem, pt.x, pt.y) == RGB(244, 246, 250),
+            "下拉框圆角外侧应融入页面底色，不得出现白色方角");
+    }
+
+    SelectObject(mem, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    ReleaseDC(NULL, screen);
+
+    HRGN comboRgn = CreateRectRgn(0, 0, 0, 0);
+    int regionType = GetWindowRgn(g_hToolFuncCombo, comboRgn);
+    CHECK_MSG(regionType != ERROR && regionType != NULLREGION, "下拉框应裁成圆角窗口区域");
+    DeleteObject(comboRgn);
+
+    // --- 26px 下拉框在 34px 行内垂直居中，而不是顶边对齐 ---
+    RECT comboRc, editRc;
+    GetWindowRect(g_hToolFuncCombo, &comboRc);
+    GetWindowRect(g_hShredPath, &editRc);
+    CHECK_MSG(CenterY(comboRc) == CenterY(editRc),
+        "下拉框应与同排输入框垂直居中对齐");
+    CHECK_MSG(comboRc.top >= editRc.top, "下拉框不得顶到行上沿");
+
+    // --- 输入框文字区域必须下移并居中 ---
+    LONG_PTR editStyle = GetWindowLongPtrW(g_hShredPath, GWL_STYLE);
+    CHECK_MSG((editStyle & ES_MULTILINE) != 0,
+        "居中输入框应为多行样式（单行 EDIT 无法垂直排版）");
+    RECT editClient;
+    GetClientRect(g_hShredPath, &editClient);
+
+    // 实际渲染：写入文字后抓取 WM_PRINTCLIENT，检查圆角与文字纵向中心
+    SetWindowTextW(g_hShredPath, L"TEST");
+    HDC screen2 = GetDC(NULL);
+    HDC mem2 = CreateCompatibleDC(screen2);
+    HBITMAP bmp2 = CreateCompatibleBitmap(screen2, editClient.right, editClient.bottom);
+    HGDIOBJ oldBmp2 = SelectObject(mem2, bmp2);
+    RECT fill2 = { 0, 0, editClient.right, editClient.bottom };
+    FillRect(mem2, &fill2, (HBRUSH)GetStockObject(WHITE_BRUSH));
+    SendMessageW(g_hShredPath, WM_PRINTCLIENT, (WPARAM)mem2, PRF_CLIENT);
+
+    // 圆角外侧必须是页面底色：打印路径也要和屏幕绘制一致
+    const POINT editCorners[] = {
+        { 1, 1 }, { (int)editClient.right - 2, 1 },
+        { 1, (int)editClient.bottom - 2 },
+        { (int)editClient.right - 2, (int)editClient.bottom - 2 } };
+    for (const POINT& pt : editCorners) {
+        CHECK_MSG(GetPixel(mem2, pt.x, pt.y) == RGB(244, 246, 250),
+            "输入框圆角外侧应融入页面底色，不得出现白色方角");
+    }
+    CHECK_MSG(GetPixel(mem2, editClient.right - 40, editClient.bottom / 2) ==
+              RGB(255, 255, 255), "输入框圆角内部仍应为白色底");
+
+    int inkTop = -1, inkBottom = -1;
+    for (int y = 0; y < editClient.bottom; ++y) {
+        for (int x = UiScale(20); x < UiScale(90); ++x) {
+            COLORREF px = GetPixel(mem2, x, y);
+            if (GetRValue(px) < 160 && GetGValue(px) < 160 && GetBValue(px) < 160) {
+                if (inkTop < 0) inkTop = y;
+                inkBottom = y;
+                break;
+            }
+        }
+    }
+    SelectObject(mem2, oldBmp2);
+    DeleteObject(bmp2);
+    DeleteDC(mem2);
+    ReleaseDC(NULL, screen2);
+
+    CHECK_MSG(inkTop >= 0 && inkBottom > inkTop, "输入框应渲染出可见文字");
+    CHECK_MSG(inkTop >= UiScale(5), "输入框文字不得贴顶（原 BUG：首行画在 y=1）");
+    CHECK_MSG(abs((inkTop + inkBottom) / 2 - editClient.bottom / 2) <= 2,
+        "输入框文字应垂直居中");
+
+    SetWindowTextW(g_hShredPath, L"");
+    PumpMessages(30);
+
+    CHECK_MSG(EditPlaceholder(g_hShredPath) &&
+              wcscmp(EditPlaceholder(g_hShredPath), L"选择要粉碎的文件") == 0,
+        "文件粉碎输入框应使用自定义居中占位提示");
+
+    // --- 第二行：年龄下拉框与操作按钮同高对齐 ---
+    SwitchToolFunction(5);
+    PumpMessages(60);
+    RECT ageRc, scanRc, infoRc;
+    GetWindowRect(g_hToolAgeCombo, &ageRc);
+    GetWindowRect(GetDlgItem(g_hTab, ID_TOOL_BTN_SCAN), &scanRc);
+    CHECK_MSG(CenterY(ageRc) == CenterY(scanRc),
+        "文件年龄下拉框应与同行按钮垂直居中");
+    GetWindowRect(g_hToolInfoLabel, &infoRc);
+    CHECK_MSG(CenterY(infoRc) == CenterY(scanRc),
+        "提示文字应与同行按钮垂直居中");
+
+    // --- 提示文字背景必须与页签底色一致（不能留白条） ---
+    HDC dc = CreateCompatibleDC(NULL);
+    HBRUSH infoBrush = (HBRUSH)SendMessageW(g_hMainWnd, WM_CTLCOLORSTATIC,
+        (WPARAM)dc, (LPARAM)g_hToolInfoLabel);
+    CHECK_MSG(infoBrush && infoBrush != (HBRUSH)GetStockObject(HOLLOW_BRUSH),
+        "提示文字背景不得透明");
+    if (infoBrush) {
+        LOGBRUSH lb = {};
+        CHECK_MSG(GetObjectW(infoBrush, sizeof(lb), &lb) == sizeof(lb) &&
+                  lb.lbStyle == BS_SOLID && lb.lbColor == RGB(244, 246, 250),
+            "提示文字背景应与页签底色一致");
+    }
+    DeleteDC(dc);
+
+    SwitchToolFunction(0);
+    SwitchTab(0);
+    PumpMessages(40);
+}
+
+static void Test_LayoutSizes(HWND hWnd) {
+    GROUP("GUI-LAYOUT 多尺寸布局");
+    CheckLayout(hWnd, 1000, 660, "compact-1000x660");
+    CheckLayout(hWnd, 1180, 750, "normal-1180x750");
+    CheckLayout(hWnd, 1600, 1000, "large-1600x1000");
+
+    // 最小跟踪尺寸：窗口管理器会用它阻止拖得更小
+    g_dpi = 96;
+    MINMAXINFO mmi = {};
+    UiOnGetMinMaxInfo(&mmi);
+    CHECK_MSG(mmi.ptMinTrackSize.x == 980 && mmi.ptMinTrackSize.y == 640,
+        "96 DPI 最小窗口应为 980x640");
+
+    // 144 DPI 缩放：尺寸与最小窗口都要按 1.5 倍放大
+    g_dpi = 144;
+    CHECK_MSG(UiScale(100) == 150, "144 DPI 下 100px 应缩放为 150px");
+    CHECK_MSG(UiCurrentDpi() == 144, "UiCurrentDpi 应反映当前 DPI");
+    mmi = {};
+    UiOnGetMinMaxInfo(&mmi);
+    CHECK_MSG(mmi.ptMinTrackSize.x == 1470 && mmi.ptMinTrackSize.y == 960,
+        "144 DPI 最小窗口应为 1470x960");
+    g_dpi = 96;
+    CHECK_MSG(UiScale(100) == 100, "恢复 96 DPI 后缩放系数应归一");
+
+    // 模拟 144 DPI 下的最小窗口（1470x960 物理像素）：
+    // 按同样的几何公式摆放侧边栏与页签，再运行页面布局引擎验证越界
+    SetWindowPos(hWnd, NULL, -32000, -32000, 1470, 960,
+        SWP_NOZORDER | SWP_NOACTIVATE);
+    PumpMessages(150);
+    g_dpi = 144;
+    RECT client;
+    GetClientRect(hWnd, &client);
+    int sideW = UiScale(client.right < UiScale(1160) ? 72 : 214);
+    SetWindowPos(g_hSidebar, NULL, 0, 0, sideW, client.bottom, SWP_NOZORDER);
+    int contentX = sideW + UiScale(28);
+    int tabTop = UiScale(88);
+    SetWindowPos(g_hTab, NULL, contentX, tabTop,
+        client.right - contentX - UiScale(28),
+        client.bottom - tabTop - UiScale(52), SWP_NOZORDER);
+    RECT pageRect;
+    GetClientRect(g_hTab, &pageRect);
+    TabCtrl_AdjustRect(g_hTab, FALSE, &pageRect);
+    LayoutPages(pageRect);
+    for (int page = 0; page < 7; page++) {
+        SwitchTab(page);
+        PumpMessages(40);
+        CheckChildBounds("dpi144-min", page);
+    }
+    SwitchTab(0);
+
+    // 恢复正常 DPI 与常规尺寸，避免影响收尾
+    g_dpi = 96;
+    SetWindowPos(hWnd, NULL, -32000, -32000, 1180, 750,
+        SWP_NOZORDER | SWP_NOACTIVATE);
+    PumpMessages(150);
+    UiLayoutMainWindow(hWnd);
+    PumpMessages(50);
+}
+
 // ====================== 入口 ======================
 int main() {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -1064,6 +1403,9 @@ int main() {
     Test_SafeCommands();
     Test_SpeedTestFlow();
     Test_RegCleanGuards();
+    Test_DynamicTextBackground();
+    Test_ToolsToolbarPolish();
+    Test_LayoutSizes(hWnd);
 
     // 收尾：让可能残留的定时器/子类化正常释放
     SwitchTab(0);

@@ -1,5 +1,6 @@
 ﻿// Module: SystemCleaner.cpp - Main entry point, window procedure, and global variables
 
+#include "Resource.h"
 #include "common.h"
 
 // ====================== 全局控件句柄 ======================
@@ -83,15 +84,93 @@ CRITICAL_SECTION g_uninstallItemsLock;
  */
 LRESULT CALLBACK TabSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
 {
-    if (uMsg == WM_COMMAND)
+    switch (uMsg)
     {
-        SendMessage(g_hMainWnd, uMsg, wParam, lParam);
+    case WM_COMMAND:
+    case WM_NOTIFY:
+    case WM_DRAWITEM:
+        return SendMessage(g_hMainWnd, uMsg, wParam, lParam);
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        return SendMessage(g_hMainWnd, uMsg, wParam, lParam);
+    case WM_PAINT:
+        UiPaintPageHost(hWnd, NULL);
+        return 0;
+    case WM_PRINTCLIENT:
+        UiPaintPageHost(hWnd, (HDC)wParam);
+        return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+    case WM_LBUTTONDBLCLK:
+        // 原生标签头已隐藏，吞掉点击避免用户误触到不可见的标签
         return 0;
     }
     return DefSubclassProc(hWnd, uMsg, wParam, lParam);
 }
 
 // ====================== 标签页切换 ======================
+
+/**
+ * @brief 状态栏显示当前页摘要（扫描/清理进行中时保留进度文本）
+ */
+static void UpdatePageStatus(int index) {
+    if (!g_hStatusText) return;
+    if (g_isScanning || g_isCleaning || g_isRegScanning || g_isSpeedTesting ||
+        g_isNetworkRepairing || g_isUninstalling || g_isUninstallScanning) {
+        return;
+    }
+    wchar_t buf[160] = { 0 };
+    switch (index) {
+    case 0: {
+        int total = g_hCleanList ? ListView_GetItemCount(g_hCleanList) : 0;
+        if (total > 0) {
+            int checked = 0;
+            for (int i = 0; i < total; ++i) {
+                if (ListView_GetCheckState(g_hCleanList, i)) ++checked;
+            }
+            swprintf_s(buf, L"垃圾清理 · 共 %d 个类别，已选 %d 个", total, checked);
+        } else {
+            wcscpy_s(buf, L"垃圾清理 · 点击「开始扫描」统计可清理文件");
+        }
+        break;
+    }
+    case 1: {
+        int n = g_hStartupList ? ListView_GetItemCount(g_hStartupList) : 0;
+        if (n > 0) swprintf_s(buf, L"开机启动项 · 当前显示 %d 项", n);
+        else wcscpy_s(buf, L"开机启动项 · 点击「刷新扫描」读取启动项");
+        break;
+    }
+    case 2: {
+        int n = g_hContextMenuList ? ListView_GetItemCount(g_hContextMenuList) : 0;
+        if (n > 0) swprintf_s(buf, L"右键菜单 · 当前显示 %d 项", n);
+        else wcscpy_s(buf, L"右键菜单 · 点击「刷新扫描」重新检测");
+        break;
+    }
+    case 3: {
+        int n = g_hRegCleanList ? ListView_GetItemCount(g_hRegCleanList) : 0;
+        if (n > 0) swprintf_s(buf, L"注册表清理 · 共 %d 项可清理", n);
+        else wcscpy_s(buf, L"注册表清理 · 点击「扫描垃圾」检查无效残留");
+        break;
+    }
+    case 4:
+        wcscpy_s(buf, L"网络工具 · 测速、Hosts 编辑与一键修复");
+        break;
+    case 5: {
+        int n = g_hUninstallList ? ListView_GetItemCount(g_hUninstallList) : 0;
+        if (n > 0) swprintf_s(buf, L"强力卸载 · 当前显示 %d 个软件", n);
+        else wcscpy_s(buf, L"强力卸载 · 点击「刷新扫描」加载已安装软件");
+        break;
+    }
+    default:
+        wcscpy_s(buf, L"实用工具 · 文件粉碎、进程管理与磁盘清理");
+        break;
+    }
+    if (buf[0]) SetWindowTextW(g_hStatusText, buf);
+}
 
 /**
  * @brief 根据选中的标签页索引显示对应的控件，隐藏其他页面的控件
@@ -173,6 +252,7 @@ void SwitchTab(int index) {
 
     // 功能选择下拉框始终可见
     ShowWindow(g_hToolFuncCombo, showTool ? SW_SHOW : SW_HIDE);
+    UpdatePageStatus(index);
 }
 
 // ====================== 窗口过程 ======================
@@ -394,7 +474,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             tabRect.left + 440, tabRect.top + 17, 35, 20, g_hTab, (HMENU)7007, g_hInst, NULL);
 
         g_hUninstallSearch = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD | ES_AUTOHSCROLL,
+            WS_CHILD | ES_AUTOHSCROLL | ES_MULTILINE,
             tabRect.left + 475, tabRect.top + 12, 200, 25, g_hTab, (HMENU)7008, g_hInst, NULL);
 
         CreateWindowW(L"BUTTON", L"强制卸载", WS_CHILD | BS_PUSHBUTTON,
@@ -416,12 +496,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         SendMessageW(g_hToolFuncCombo, CB_ADDSTRING, 0, (LPARAM)L"磁盘清理助手");
 
         // 路径编辑框（文件粉碎和其他工具共用）
+        // ES_MULTILINE 必须在创建时指定：EDIT 在 WM_CREATE 时缓存单/多行状态，
+        // 之后再 SetWindowLongPtr 改样式不会生效，EM_SETRECTNP 也就无法垂直居中文字。
         g_hShredPath = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD | ES_AUTOHSCROLL,
+            WS_CHILD | ES_AUTOHSCROLL | ES_MULTILINE,
             tabRect.left + 10, tabRect.top + 50, listW - 230, 25, g_hTab, NULL, g_hInst, NULL);
 
         g_hToolPathEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD | ES_AUTOHSCROLL,
+            WS_CHILD | ES_AUTOHSCROLL | ES_MULTILINE,
             tabRect.left + 10, tabRect.top + 50, listW - 230, 25, g_hTab, (HMENU)6011, g_hInst, NULL);
 
         // 按钮组（统一位置）
@@ -469,172 +551,58 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         RefreshStartupList();
         RefreshContextMenuList();
 
-        ShowWindow(g_hStartupList, SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 2001), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 2002), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 2003), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 2005), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 2006), SW_HIDE);
-        ShowWindow(g_hContextMenuList, SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 3001), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 3002), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 3003), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 3005), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 3006), SW_HIDE);
-        ShowWindow(g_hRegCleanList, SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 5001), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 5002), SW_HIDE);
-        ShowWindow(g_hSpeedResult, SW_HIDE);
-        ShowWindow(g_hHostsEdit, SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 4001), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 4002), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 4003), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 4004), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 4005), SW_HIDE);
-        ShowWindow(g_hUninstallList, SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 7001), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 7002), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 7003), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 7004), SW_HIDE);
-        ShowWindow(g_hUninstallFilter, SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 7007), SW_HIDE);
-        ShowWindow(g_hUninstallSearch, SW_HIDE);
-        ShowWindow(g_hShredPath, SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 6001), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 6002), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 6010), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 6011), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 6012), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 6013), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 6014), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 6015), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 6016), SW_HIDE);
-        ShowWindow(GetDlgItem(g_hTab, 6020), SW_HIDE);
-        ShowWindow(g_hToolListView, SW_HIDE);
+        // 统一由 SwitchTab 维护显隐矩阵，避免初始化与运行期两套逻辑漂移
+        SwitchTab(0);
+
+        // 安装现代化外壳：DPI 字体、自绘控件、侧边导航、卡片布局
+        UiInstall(hWnd);
+        UiLayoutMainWindow(hWnd);
         break;
     }
 
-    case WM_SIZE: {
-        int w = LOWORD(lParam);
-        int h = HIWORD(lParam);
-
-        SetWindowPos(g_hTab, NULL, 10, 10, w - 20, h - 50, SWP_NOZORDER);
-
-        RECT tabRect;
-        GetClientRect(g_hTab, &tabRect);
-        TabCtrl_AdjustRect(g_hTab, FALSE, &tabRect);
-
-        int listW = tabRect.right - tabRect.left - 20;
-        int listH = tabRect.bottom - tabRect.top - 50;
-
-        AdjustListViewHeight(g_hCleanList, tabRect, 50, 50);
-        SetWindowPos(g_hCleanProgress, NULL, tabRect.left + 10, tabRect.bottom - 30, listW, 20, SWP_NOZORDER);
-
-        AdjustListViewHeight(g_hStartupList, tabRect, 50, 50);
-
-        AdjustListViewHeight(g_hContextMenuList, tabRect, 50, 50);
-
-        AdjustListViewHeight(g_hRegCleanList, tabRect, 50, 50);
-
-        AdjustListViewHeight(g_hUninstallList, tabRect, 50, 50);
-
-        SetWindowPos(g_hSpeedResult, NULL, tabRect.left + 10, tabRect.top + 60, listW, 95, SWP_NOZORDER);
-        SetWindowPos(g_hSpeedProgress, NULL, tabRect.left + 10, tabRect.top + 160, listW, 20, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 4006), NULL, tabRect.left + 10, tabRect.top + 195, 200, 20, SWP_NOZORDER);
-        SetWindowPos(g_hHostsEdit, NULL, tabRect.left + 10, tabRect.top + 225, listW, listH - 180, SWP_NOZORDER);
-
-        int btnRight = tabRect.right - 10;
-        SetWindowPos(GetDlgItem(g_hTab, 1004), NULL, btnRight - 100, tabRect.top + 10, 100, 30, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 1003), NULL, btnRight - 210, tabRect.top + 10, 100, 30, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 1005), NULL, btnRight - 330, tabRect.top + 10, 100, 30, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 1006), NULL, tabRect.left + 190, tabRect.top + 10, 80, 30, SWP_NOZORDER);
-
-        SetWindowPos(GetDlgItem(g_hTab, 4001), NULL, tabRect.left + 10, tabRect.top + 10, 120, 30, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 4002), NULL, tabRect.left + 140, tabRect.top + 10, 120, 30, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 4003), NULL, tabRect.left + 270, tabRect.top + 10, 120, 30, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 4004), NULL, btnRight - 220, tabRect.top + 190, 100, 30, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 4005), NULL, btnRight - 110, tabRect.top + 190, 100, 30, SWP_NOZORDER);
-
-        SetWindowPos(GetDlgItem(g_hTab, 2001), NULL, tabRect.left + 10, tabRect.top + 10, 100, 30, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 2002), NULL, tabRect.left + 120, tabRect.top + 10, 100, 30, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 2003), NULL, tabRect.left + 230, tabRect.top + 10, 100, 30, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 2005), NULL, tabRect.right - 225, tabRect.top + 12, 130, 200, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 2006), NULL, tabRect.right - 300, tabRect.top + 17, 75, 20, SWP_NOZORDER);
-
-        SetWindowPos(GetDlgItem(g_hTab, 3001), NULL, tabRect.left + 10, tabRect.top + 10, 100, 30, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 3002), NULL, tabRect.left + 120, tabRect.top + 10, 100, 30, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 3003), NULL, tabRect.left + 230, tabRect.top + 10, 100, 30, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 3005), NULL, tabRect.right - 225, tabRect.top + 12, 130, 200, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 3006), NULL, tabRect.right - 300, tabRect.top + 17, 75, 20, SWP_NOZORDER);
-
-        SetWindowPos(GetDlgItem(g_hTab, 5001), NULL, tabRect.left + 10, tabRect.top + 10, 100, 30, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 5002), NULL, tabRect.left + 120, tabRect.top + 10, 100, 30, SWP_NOZORDER);
-
-        SetWindowPos(GetDlgItem(g_hTab, 7001), NULL, tabRect.left + 10, tabRect.top + 10, 80, 30, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 7002), NULL, tabRect.left + 95, tabRect.top + 10, 80, 30, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 7003), NULL, tabRect.left + 180, tabRect.top + 17, 110, 20, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 7010), NULL, tabRect.left + 300, tabRect.top + 17, 35, 20, SWP_NOZORDER);
-        SetWindowPos(g_hUninstallFilter, NULL, tabRect.left + 340, tabRect.top + 12, 90, 200, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 7007), NULL, tabRect.left + 440, tabRect.top + 17, 35, 20, SWP_NOZORDER);
-        SetWindowPos(g_hUninstallSearch, NULL, tabRect.left + 475, tabRect.top + 12, 200, 25, SWP_NOZORDER);
-        SetWindowPos(GetDlgItem(g_hTab, 7004), NULL, btnRight - 110, tabRect.top + 10, 100, 30, SWP_NOZORDER);
-
-        // Tools page layout
-        int toolTop = tabRect.top + 10;
-        int btnRight2 = tabRect.right - 110;
-
-        // Function selector label + combo (top)
-        SetWindowPos(GetDlgItem(g_hTab, 6030), NULL, tabRect.left + 10, toolTop + 2, 80, 20, SWP_NOZORDER);
-        SetWindowPos(g_hToolFuncCombo, NULL, tabRect.left + 90, toolTop, 180, 300, SWP_NOZORDER);
-
-        // Path edit (shared between shred and other tools)
-        SetWindowPos(g_hShredPath, NULL, tabRect.left + 10, toolTop + 40, tabRect.right - tabRect.left - 230, 25, SWP_NOZORDER);
-        SetWindowPos(g_hToolPathEdit, NULL, tabRect.left + 10, toolTop + 40, tabRect.right - tabRect.left - 230, 25, SWP_NOZORDER);
-
-        // Buttons (unified positions)
-        SetWindowPos(GetDlgItem(g_hTab, 6001), NULL, btnRight2, toolTop + 40, 100, 25, SWP_NOZORDER); // select file
-        SetWindowPos(GetDlgItem(g_hTab, 6012), NULL, btnRight2, toolTop + 40, 100, 25, SWP_NOZORDER); // browse
-        SetWindowPos(GetDlgItem(g_hTab, 6002), NULL, btnRight2, toolTop + 72, 100, 25, SWP_NOZORDER); // shred
-        SetWindowPos(GetDlgItem(g_hTab, 6013), NULL, btnRight2, toolTop + 72, 100, 25, SWP_NOZORDER); // scan
-        SetWindowPos(GetDlgItem(g_hTab, 6014), NULL, btnRight2, toolTop + 104, 100, 25, SWP_NOZORDER); // action
-
-        // Age combo for disk cleanup
-        SetWindowPos(g_hToolAgeCombo, NULL, tabRect.left + 10, toolTop + 72, 150, 250, SWP_NOZORDER);
-
-        // Info label
-        SetWindowPos(g_hToolInfoLabel, NULL, tabRect.left + 10, toolTop + 104, tabRect.right - tabRect.left - 130, 20, SWP_NOZORDER);
-
-        // ListView fills remaining space
-        int listTop = toolTop + 130;
-        int toolListH = tabRect.bottom - listTop - 5;
-        SetWindowPos(g_hToolListView, NULL, tabRect.left + 10, listTop, tabRect.right - tabRect.left - 20, toolListH, SWP_NOZORDER);
-
-        // Apply tool-specific visibility
-        {
-            bool showTool = (TabCtrl_GetCurSel(g_hTab) == 6);
-            if (showTool && g_toolsReady) {
-                // Re-apply current function's visibility
-                SwitchToolFunction(g_toolFunction);
-            } else {
-                // Hide all tool controls
-                ShowWindow(g_hToolFuncCombo, SW_HIDE);
-                ShowWindow(g_hToolListView, SW_HIDE);
-                ShowWindow(g_hToolPathEdit, SW_HIDE);
-                ShowWindow(GetDlgItem(g_hTab, 6012), SW_HIDE);
-                ShowWindow(GetDlgItem(g_hTab, 6013), SW_HIDE);
-                ShowWindow(GetDlgItem(g_hTab, 6014), SW_HIDE);
-                ShowWindow(g_hToolAgeCombo, SW_HIDE);
-                ShowWindow(g_hToolInfoLabel, SW_HIDE);
-                ShowWindow(GetDlgItem(g_hTab, 6020), SW_HIDE);
-                ShowWindow(g_hShredPath, SW_HIDE);
-                ShowWindow(GetDlgItem(g_hTab, 6001), SW_HIDE);
-                ShowWindow(GetDlgItem(g_hTab, 6002), SW_HIDE);
-                ShowWindow(GetDlgItem(g_hTab, 6030), SW_HIDE);
-            }
-        }
-
-        SetWindowPos(g_hStatusText, NULL, 10, h - 30, w - 20, 20, SWP_NOZORDER);
+    case WM_SIZE:
+        UiLayoutMainWindow(hWnd);
         break;
+
+    case WM_PAINT:
+        UiPaintMainWindow(hWnd, NULL);
+        break;
+
+    case WM_PRINTCLIENT:
+        UiPaintMainWindow(hWnd, (HDC)wParam);
+        break;
+
+    case WM_ERASEBKGND:
+        // 所有背景都由自绘层覆盖，避免原生擦除造成闪烁
+        return 1;
+
+    case WM_DRAWITEM: {
+        if (UiDrawOwnerButton((const DRAWITEMSTRUCT*)lParam)) return TRUE;
+        break;
+    }
+
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        return (LRESULT)UiCtlColor(message, (HDC)wParam, (HWND)lParam);
+
+    case WM_GETMINMAXINFO:
+        UiOnGetMinMaxInfo((MINMAXINFO*)lParam);
+        return 0;
+
+    case WM_DPICHANGED:
+        UiOnDpiChanged(hWnd, wParam, lParam);
+        return 0;
+
+    case WM_APP_UI_NAV: {
+        int index = (int)wParam;
+        if (index >= 0 && index < 7) {
+            TabCtrl_SetCurSel(g_hTab, index);
+            SwitchTab(index);
+            UiSyncChrome(hWnd);
+        }
+        return 0;
     }
 
     case WM_NOTIFY: {
@@ -642,7 +610,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         if (lpnmhdr->hwndFrom == g_hTab && lpnmhdr->code == TCN_SELCHANGE) {
             int curSel = TabCtrl_GetCurSel(g_hTab);
             SwitchTab(curSel);
+            UiSyncChrome(hWnd);
+            break;
         }
+        LRESULT customDraw = 0;
+        if (UiHandleNotify(lParam, &customDraw)) return customDraw;
         break;
     }
 
@@ -1399,6 +1371,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nCmdShow) {
     const wchar_t CLASS_NAME[] = L"SystemCleanerClass";
 
+    UiInitProcessDpi();
+
     InitializeCriticalSection(&g_uninstallItemsLock);
 
     WNDCLASSEXW wc = { 0 };
@@ -1407,14 +1381,25 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.hbrBackground = NULL;
     wc.lpszClassName = CLASS_NAME;
+    wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_SYSTEMCLEANER));
+    wc.hIconSm = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_SMALL));
 
     RegisterClassExW(&wc);
 
+    int screenW = GetSystemMetrics(SM_CXSCREEN);
+    int screenH = GetSystemMetrics(SM_CYSCREEN);
+    int initW = UiScale(1180);
+    int initH = UiScale(750);
+    if (initW > screenW - 80) initW = screenW - 80;
+    if (initH > screenH - 100) initH = screenH - 100;
+    if (initW < 900) initW = 900;
+    if (initH < 640) initH = 640;
+
     HWND hWnd = CreateWindowExW(
-        0, CLASS_NAME, L"系统清理工具箱", WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 860, 620,
+        0, CLASS_NAME, L"SystemCleaner - 系统清理工具箱", WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, initW, initH,
         NULL, NULL, hInstance, NULL
     );
 

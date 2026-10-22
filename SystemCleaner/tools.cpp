@@ -58,12 +58,15 @@ void SwitchToolFunction(int funcId) {
 
     wchar_t scanLabel[64] = { 0 };
     wchar_t actionLabel[64] = { 0 };
+    const wchar_t* infoHint = nullptr;
 
     switch (funcId) {
     case 0: // 文件粉碎
         ShowWindow(g_hShredPath, SW_SHOW);
         ShowWindow(GetDlgItem(g_hTab, 6001), SW_SHOW);
         ShowWindow(GetDlgItem(g_hTab, 6002), SW_SHOW);
+        ShowWindow(g_hToolInfoLabel, SW_SHOW);
+        infoHint = L"粉碎会覆写文件内容，操作不可撤销";
         break;
 
     case 1: // 系统信息
@@ -82,6 +85,7 @@ void SwitchToolFunction(int funcId) {
         ShowWindow(g_hToolInfoLabel, SW_SHOW);
         ShowWindow(g_hToolListView, SW_SHOW);
         CreateToolListColumns();
+        infoHint = L"选择文件夹后点击「开始扫描」查找重复文件";
         break;
 
     case 3: // 进程管理
@@ -105,6 +109,7 @@ void SwitchToolFunction(int funcId) {
         ShowWindow(g_hToolInfoLabel, SW_SHOW);
         ShowWindow(g_hToolListView, SW_SHOW);
         CreateToolListColumns();
+        infoHint = L"选择文件夹后点击「扫描失效」检查快捷方式";
         break;
 
     case 5: // 磁盘清理助手
@@ -118,50 +123,81 @@ void SwitchToolFunction(int funcId) {
         ShowWindow(g_hToolInfoLabel, SW_SHOW);
         ShowWindow(g_hToolListView, SW_SHOW);
         CreateToolListColumns();
+        infoHint = L"选择文件夹与文件年龄后点击「开始扫描」";
         break;
     }
 
     if (scanLabel[0]) SetWindowTextW(GetDlgItem(g_hTab, ID_TOOL_BTN_SCAN), scanLabel);
     if (actionLabel[0]) SetWindowTextW(GetDlgItem(g_hTab, ID_TOOL_BTN_ACTION), actionLabel);
+    if (infoHint) SetWindowTextW(g_hToolInfoLabel, infoHint);
+
+    if (g_hTab) {
+        RECT tabRect;
+        GetClientRect(g_hTab, &tabRect);
+        TabCtrl_AdjustRect(g_hTab, FALSE, &tabRect);
+        LayoutToolControls(tabRect);
+        InvalidateRect(g_hTab, NULL, TRUE);
+    }
 }
 
 // ====================== Layout Helpers ======================
 
 void LayoutToolControls(const RECT& tabRect) {
-    int btnLeft = tabRect.left + 10;
-    int btnRight = tabRect.right - 110;
-    int top = tabRect.top + 10;
+    int left = tabRect.left;
+    int right = tabRect.right;
+    int top = tabRect.top;
+    int pad = UiScale(UiMetrics::CardPadding);
+    int btnH = UiScale(UiMetrics::ButtonHeight);
+    int gap = UiScale(8);
+    int btnW = UiScale(94);
 
-    // Function selector (top)
-    SetWindowPos(GetDlgItem(g_hTab, 6030), NULL, btnLeft, top + 2, 80, 20, SWP_NOZORDER);
-    SetWindowPos(g_hToolFuncCombo, NULL, btnLeft + 80, top, 180, 300, SWP_NOZORDER);
+    // 第一行：功能选择 + 路径 + 选择/浏览
+    SetWindowPos(GetDlgItem(g_hTab, 6030), NULL, left,
+        top + (btnH - UiScale(18)) / 2, UiScale(64), UiScale(18), SWP_NOZORDER);
+    UiCenterComboInRow(g_hToolFuncCombo, left + UiScale(68), UiScale(168),
+        top, btnH, 260);
 
-    // Path edit (shared)
+    int pathX = left + UiScale(248);
+    int pathW = right - btnW - gap - pathX;
+    if (pathW < UiScale(160)) pathW = UiScale(160);
     if (g_hShredPath)
-        SetWindowPos(g_hShredPath, NULL, btnLeft, top + 40, tabRect.right - tabRect.left - 230, 25, SWP_NOZORDER);
+        SetWindowPos(g_hShredPath, NULL, pathX, top, pathW, btnH, SWP_NOZORDER);
     if (g_hToolPathEdit)
-        SetWindowPos(g_hToolPathEdit, NULL, btnLeft, top + 40, tabRect.right - tabRect.left - 230, 25, SWP_NOZORDER);
+        SetWindowPos(g_hToolPathEdit, NULL, pathX, top, pathW, btnH, SWP_NOZORDER);
 
-    // Buttons (unified positions)
-    SetWindowPos(GetDlgItem(g_hTab, 6001), NULL, btnRight, top + 40, 100, 25, SWP_NOZORDER); // select file
-    SetWindowPos(GetDlgItem(g_hTab, ID_TOOL_BTN_BROWSE), NULL, btnRight, top + 40, 100, 25, SWP_NOZORDER); // browse
-    SetWindowPos(GetDlgItem(g_hTab, 6002), NULL, btnRight, top + 72, 100, 25, SWP_NOZORDER); // shred
-    SetWindowPos(GetDlgItem(g_hTab, ID_TOOL_BTN_SCAN), NULL, btnRight, top + 72, 100, 25, SWP_NOZORDER); // scan
-    SetWindowPos(GetDlgItem(g_hTab, ID_TOOL_BTN_ACTION), NULL, btnRight, top + 104, 100, 25, SWP_NOZORDER); // action
+    SetWindowPos(GetDlgItem(g_hTab, 6001), NULL, right - btnW, top, btnW, btnH, SWP_NOZORDER);
+    SetWindowPos(GetDlgItem(g_hTab, ID_TOOL_BTN_BROWSE), NULL, right - btnW, top, btnW, btnH, SWP_NOZORDER);
 
-    // Age combo
-    if (g_hToolAgeCombo)
-        SetWindowPos(g_hToolAgeCombo, NULL, btnLeft, top + 72, 150, 250, SWP_NOZORDER);
+    // 第二行：文件年龄 + 提示信息 + 扫描/操作
+    int row2 = top + btnH + gap;
+    UiCenterComboInRow(g_hToolAgeCombo, left, UiScale(116), row2, btnH, 240);
 
-    // Info label
+    int actionX = right - btnW;
+    int scanX = actionX - gap - btnW;
+    SetWindowPos(GetDlgItem(g_hTab, ID_TOOL_BTN_SCAN), NULL, scanX, row2, btnW, btnH, SWP_NOZORDER);
+    SetWindowPos(GetDlgItem(g_hTab, ID_TOOL_BTN_ACTION), NULL, actionX, row2, btnW, btnH, SWP_NOZORDER);
+    SetWindowPos(GetDlgItem(g_hTab, 6002), NULL, actionX, row2, btnW, btnH, SWP_NOZORDER);
+
+    int infoX = (g_toolFunction == 5) ? left + UiScale(124) : left;
     if (g_hToolInfoLabel)
-        SetWindowPos(g_hToolInfoLabel, NULL, btnLeft, top + 104, tabRect.right - tabRect.left - 130, 20, SWP_NOZORDER);
+        SetWindowPos(g_hToolInfoLabel, NULL, infoX,
+            row2 + (btnH - UiScale(18)) / 2,
+            scanX - gap - infoX, UiScale(18), SWP_NOZORDER);
 
-    // ListView fills remaining space
-    int listTop = top + 130;
-    int listH = tabRect.bottom - listTop - 5;
+    // 列表：系统信息页可紧贴功能栏，其余功能为两行工具栏留出空间
+    int cardTop = top + UiScale(g_toolFunction == 1 ? UiMetrics::CardTop
+                                                   : UiMetrics::CardTop + 40);
+    int listTop = cardTop + pad;
+    int listH = tabRect.bottom - UiScale(16) - pad - listTop;
+    if (listH < UiScale(80)) listH = UiScale(80);
     if (g_hToolListView)
-        SetWindowPos(g_hToolListView, NULL, btnLeft, listTop, tabRect.right - tabRect.left - 20, listH, SWP_NOZORDER);
+        SetWindowPos(g_hToolListView, NULL, left + pad, listTop,
+            right - left - pad * 2, listH, SWP_NOZORDER);
+
+    HWND toolHeader = g_hToolListView ? ListView_GetHeader(g_hToolListView) : NULL;
+    if (toolHeader && Header_GetItemCount(toolHeader) > 0) {
+        UiStretchLastColumn(g_hToolListView);
+    }
 }
 
 void ShowToolControls(bool show) {
@@ -205,7 +241,7 @@ static void AddToolColumn(const wchar_t* title, int width) {
     lvc.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT;
     lvc.fmt = LVCFMT_LEFT;
     lvc.pszText = (LPWSTR)title;
-    lvc.cx = width;
+    lvc.cx = UiScale(width);
     if (ListView_InsertColumn(g_hToolListView, g_toolColumnCount, &lvc) >= 0) {
         g_toolColumnCount++;
     }
@@ -282,14 +318,14 @@ static void PopulateSystemInfo() {
                 wchar_t csName[256] = { 0 };
                 DWORD dwSize = sizeof(csName);
                 RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
-                    L"ProductName", REG_SZ, NULL, csName, &dwSize);
+                    L"ProductName", RRF_RT_REG_SZ, NULL, csName, &dwSize);
                 swprintf_s(buf, L"%ls %u.%u.%u", csName, (UINT)osvi.dwMajorVersion, (UINT)osvi.dwMinorVersion, (UINT)osvi.dwBuildNumber);
                 addItem(L"操作系统", buf);
 
                 wchar_t displayVer[64] = { 0 };
                 dwSize = sizeof(displayVer);
                 RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
-                    L"DisplayVersion", REG_SZ, NULL, displayVer, &dwSize);
+                    L"DisplayVersion", RRF_RT_REG_SZ, NULL, displayVer, &dwSize);
                 if (displayVer[0]) addItem(L"版本号", displayVer);
             }
         }
@@ -321,7 +357,7 @@ static void PopulateSystemInfo() {
     wchar_t cpuName[256] = { 0 };
     DWORD cpuSize = (DWORD)sizeof(cpuName);
     if (RegGetValueW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
-        L"ProcessorNameString", REG_SZ, NULL, cpuName, &cpuSize) == 0) {
+        L"ProcessorNameString", RRF_RT_REG_SZ, NULL, cpuName, &cpuSize) == 0) {
         addItem(L"CPU型号", cpuName);
     }
 
@@ -329,14 +365,14 @@ static void PopulateSystemInfo() {
     // 必须重置缓冲区大小，否则沿用上一次读取后的剩余长度会导致读取失败、CPU 厂商为空
     DWORD vendorSize = (DWORD)sizeof(vendorId);
     if (RegGetValueW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
-        L"VendorIdentifier", REG_SZ, NULL, vendorId, &vendorSize) == 0) {
+        L"VendorIdentifier", RRF_RT_REG_SZ, NULL, vendorId, &vendorSize) == 0) {
         addItem(L"CPU厂商", vendorId);
     }
 
     wchar_t freqBuf[64] = { 0 };
     DWORD freqSize = sizeof(freqBuf);
     if (RegGetValueW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
-        L"~MHz", REG_DWORD, NULL, freqBuf, &freqSize) == 0) {
+        L"~MHz", RRF_RT_REG_DWORD, NULL, freqBuf, &freqSize) == 0) {
         DWORD mhz = *(DWORD*)freqBuf;
         swprintf_s(buf, L"%u MHz (%.2f GHz)", mhz, mhz / 1000.0);
         addItem(L"CPU频率", buf);
@@ -355,7 +391,7 @@ static void PopulateSystemInfo() {
                 DWORD cores = 0, coreSize = sizeof(cores);
                 if (RegGetValueW(HKEY_LOCAL_MACHINE,
                         (std::wstring(L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\") + subName).c_str(),
-                        L"Core Information", REG_BINARY, NULL, &cores, &coreSize) == 0) {
+                        L"Core Information", RRF_RT_REG_BINARY, NULL, &cores, &coreSize) == 0) {
                     // Core Information 低 8 位为物理核心数
                     coreCount += (cores & 0xFF);
                 } else {
@@ -386,14 +422,19 @@ static void PopulateSystemInfo() {
     HKEY hBoard;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DESCRIPTION\\System\\BIOS", 0, KEY_READ, &hBoard) == 0) {
         wchar_t infoBuf[256] = { 0 };
+        // 每次读取前必须重置缓冲区大小：RegGetValue 成功后会把剩余大小改写为
+        // 实际读到的字节数，沿用上一次的小值会让后续更长的值读取失败
         DWORD iSize = sizeof(infoBuf);
-        if (RegGetValueW(hBoard, NULL, L"BaseBoardManufacturer", REG_SZ, NULL, infoBuf, &iSize) == 0)
+        if (RegGetValueW(hBoard, NULL, L"BaseBoardManufacturer", RRF_RT_REG_SZ, NULL, infoBuf, &iSize) == 0)
             addItem(L"主板厂商", infoBuf);
-        if (RegGetValueW(hBoard, NULL, L"BaseBoardProduct", REG_SZ, NULL, infoBuf, &iSize) == 0)
+        iSize = sizeof(infoBuf);
+        if (RegGetValueW(hBoard, NULL, L"BaseBoardProduct", RRF_RT_REG_SZ, NULL, infoBuf, &iSize) == 0)
             addItem(L"主板型号", infoBuf);
-        if (RegGetValueW(hBoard, NULL, L"BIOSVendor", REG_SZ, NULL, infoBuf, &iSize) == 0)
+        iSize = sizeof(infoBuf);
+        if (RegGetValueW(hBoard, NULL, L"BIOSVendor", RRF_RT_REG_SZ, NULL, infoBuf, &iSize) == 0)
             addItem(L"BIOS厂商", infoBuf);
-        if (RegGetValueW(hBoard, NULL, L"BIOSVersion", REG_SZ, NULL, infoBuf, &iSize) == 0)
+        iSize = sizeof(infoBuf);
+        if (RegGetValueW(hBoard, NULL, L"BIOSVersion", RRF_RT_REG_SZ, NULL, infoBuf, &iSize) == 0)
             addItem(L"BIOS版本", infoBuf);
         RegCloseKey(hBoard);
     }
@@ -402,9 +443,10 @@ static void PopulateSystemInfo() {
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\SystemInformation", 0, KEY_READ, &hProduct) == 0) {
         wchar_t prodBuf[256] = { 0 };
         DWORD pSize = sizeof(prodBuf);
-        if (RegGetValueW(hProduct, NULL, L"SystemManufacturer", REG_SZ, NULL, prodBuf, &pSize) == 0)
+        if (RegGetValueW(hProduct, NULL, L"SystemManufacturer", RRF_RT_REG_SZ, NULL, prodBuf, &pSize) == 0)
             addItem(L"系统厂商", prodBuf);
-        if (RegGetValueW(hProduct, NULL, L"SystemProductName", REG_SZ, NULL, prodBuf, &pSize) == 0)
+        pSize = sizeof(prodBuf);
+        if (RegGetValueW(hProduct, NULL, L"SystemProductName", RRF_RT_REG_SZ, NULL, prodBuf, &pSize) == 0)
             addItem(L"产品型号", prodBuf);
         RegCloseKey(hProduct);
     }
@@ -427,7 +469,7 @@ static void PopulateSystemInfo() {
                 // 只处理显示设备类的实例
                 wchar_t classGuid[128] = { 0 };
                 DWORD classLen = sizeof(classGuid);
-                if (RegGetValueW(HKEY_LOCAL_MACHINE, instancePath.c_str(), L"ClassGUID", REG_SZ, NULL, classGuid, &classLen) != 0) {
+                if (RegGetValueW(HKEY_LOCAL_MACHINE, instancePath.c_str(), L"ClassGUID", RRF_RT_REG_SZ, NULL, classGuid, &classLen) != 0) {
                     classGuid[0] = 0;
                 }
                 if (classGuid[0] && _wcsicmp(classGuid, L"{4d36e968-e325-11ce-bfc1-08002be10318}") != 0) continue;
@@ -447,17 +489,17 @@ static void PopulateSystemInfo() {
                     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, adapterPath.c_str(), 0, KEY_READ, &hAdapter) == 0) {
                         wchar_t gpuName[256] = { 0 };
                         DWORD gSize = sizeof(gpuName);
-                        if (RegGetValueW(hAdapter, NULL, L"Device Description", REG_SZ, NULL, gpuName, &gSize) == 0 && gpuName[0]) {
+                        if (RegGetValueW(hAdapter, NULL, L"Device Description", RRF_RT_REG_SZ, NULL, gpuName, &gSize) == 0 && gpuName[0]) {
                             addItem(L"显卡型号", gpuName);
                             gpuFound = 1;
                         }
                         wchar_t drvName[256] = { 0 };
                         DWORD dSize = sizeof(drvName);   // 每个值都要独立的缓冲区大小
-                        if (RegGetValueW(hAdapter, NULL, L"DriverVersion", REG_SZ, NULL, drvName, &dSize) == 0)
+                        if (RegGetValueW(hAdapter, NULL, L"DriverVersion", RRF_RT_REG_SZ, NULL, drvName, &dSize) == 0)
                             addItem(L"显卡驱动", drvName);
                         ULONG ramSize = 0;
                         DWORD rSize = sizeof(ramSize);
-                        if (RegGetValueW(hAdapter, NULL, L"AdapterRAM", REG_DWORD, NULL, &ramSize, &rSize) == 0 && ramSize > 0) {
+                        if (RegGetValueW(hAdapter, NULL, L"AdapterRAM", RRF_RT_REG_DWORD, NULL, &ramSize, &rSize) == 0 && ramSize > 0) {
                             swprintf_s(buf, L"%u MB", ramSize / (1024 * 1024));
                             addItem(L"显存容量", buf);
                         }
@@ -487,11 +529,11 @@ static void PopulateSystemInfo() {
                 if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, instPath, 0, KEY_READ, &hPCIInst) == 0) {
                     wchar_t devClass[64] = { 0 };
                     DWORD dSize = sizeof(devClass);
-                    if (RegGetValueW(hPCIInst, NULL, L"Class", REG_SZ, NULL, devClass, &dSize) == 0) {
+                    if (RegGetValueW(hPCIInst, NULL, L"Class", RRF_RT_REG_SZ, NULL, devClass, &dSize) == 0) {
                         if (_wcsicmp(devClass, L"Display") == 0) {
                             wchar_t gpuName2[256] = { 0 };
                             DWORD g2Size = sizeof(gpuName2);
-                            if (RegGetValueW(hPCIInst, NULL, L"DeviceDesc", REG_SZ, NULL, gpuName2, &g2Size) == 0) {
+                            if (RegGetValueW(hPCIInst, NULL, L"DeviceDesc", RRF_RT_REG_SZ, NULL, gpuName2, &g2Size) == 0) {
                                 addItem(L"显卡型号", gpuName2);
                                 gpuFound = 1;
                             }
@@ -564,15 +606,33 @@ static void PopulateSystemInfo() {
 
 // ====================== 2. 重复文件查找 ======================
 
+// 读取工具页路径框并去掉首尾空白/成对引号（用户常直接粘贴带引号的路径）
+static std::wstring ReadToolPath() {
+    wchar_t buf[MAX_PATH] = { 0 };
+    GetWindowTextW(g_hToolPathEdit, buf, MAX_PATH);
+    std::wstring path = buf;
+    size_t first = path.find_first_not_of(L" \t\r\n");
+    size_t last = path.find_last_not_of(L" \t\r\n");
+    if (first == std::wstring::npos) return std::wstring();
+    path = path.substr(first, last - first + 1);
+    if (path.size() >= 2 && path.front() == L'"' && path.back() == L'"') {
+        path = path.substr(1, path.size() - 2);
+    }
+    return path;
+}
+
 void StartDuplicateScan() {
     if (g_isDupScanning) return;
 
-    wchar_t path[MAX_PATH] = { 0 };
-    GetWindowTextW(g_hToolPathEdit, path, MAX_PATH);
-    if (wcslen(path) == 0) {
+    std::wstring path = ReadToolPath();
+    if (path.empty()) {
         MessageBoxW(g_hMainWnd, L"请先选择要扫描的目录", L"提示", MB_OK | MB_ICONWARNING);
         return;
     }
+
+    // 扫描线程读取的是 g_toolCurrentPath；这里必须先同步，
+    // 否则手动输入路径后仍会扫描上一次的目录
+    g_toolCurrentPath = path;
 
     g_isDupScanning = true;
     g_stopDupScan = false;
@@ -718,11 +778,14 @@ void CleanSelectedDuplicates() {
     int success = 0;
     int idx = -1;
     std::vector<int> toDelete;
+    // 路径列可能超过 MAX_PATH；用大缓冲区读取完整路径，
+    // 否则截断后的路径要么删不掉，要么指向另一个文件
+    std::vector<wchar_t> pathBuf(32768);
     while ((idx = ListView_GetNextItem(g_hToolListView, idx, LVNI_SELECTED)) != -1) {
-        wchar_t path[MAX_PATH] = { 0 };
-        ListView_GetItemText(g_hToolListView, idx, 2, path, MAX_PATH);
-        if (path[0] == 0) continue;
-        std::wstring fullPath = path;
+        pathBuf[0] = 0;
+        ListView_GetItemText(g_hToolListView, idx, 2, pathBuf.data(), (int)pathBuf.size());
+        if (pathBuf[0] == 0) continue;
+        std::wstring fullPath = pathBuf.data();
         // 防御：路径穿越与系统关键目录不允许删除
         if (IsPathTraversal(fullPath) || IsSystemCriticalPath(fullPath)) continue;
         // 只读/隐藏/系统属性的文件 DeleteFileW 会失败，用 ForceDeleteFile
@@ -1054,9 +1117,8 @@ void FixSelectedShortcuts() {
 static std::vector<std::wstring> g_diskFilePaths;
 
 void StartDiskCleanupScan() {
-    wchar_t path[MAX_PATH] = { 0 };
-    GetWindowTextW(g_hToolPathEdit, path, MAX_PATH);
-    if (wcslen(path) == 0) {
+    std::wstring path = ReadToolPath();
+    if (path.empty()) {
         MessageBoxW(g_hMainWnd, L"请先选择要扫描的目录", L"提示", MB_OK | MB_ICONWARNING);
         return;
     }
@@ -1068,10 +1130,14 @@ void StartDiskCleanupScan() {
     ListView_DeleteAllItems(g_hToolListView);
 
     int ageIndex = (int)SendMessageW(g_hToolAgeCombo, CB_GETCURSEL, 0, 0);
+    if (ageIndex < 0 || ageIndex > 3) ageIndex = 0;
     // ageIndex: 0=7天 1=30天 2=90天 3=180天
 
     wchar_t ageLabel[64] = { 0 };
-    SendMessageW(g_hToolAgeCombo, CB_GETLBTEXT, ageIndex, (LPARAM)ageLabel);
+    if (SendMessageW(g_hToolAgeCombo, CB_GETLBTEXT, ageIndex, (LPARAM)ageLabel) == CB_ERR ||
+        ageLabel[0] == 0) {
+        wcscpy_s(ageLabel, L"7天前");
+    }
 
     wchar_t info[128];
     swprintf_s(info, L"正在扫描 %s 前修改的文件...", ageLabel);

@@ -319,14 +319,16 @@ void InitCleanItems() {
 void AdjustListViewHeight(HWND hListView, const RECT& tabRect, int topOffset, int bottomReserve) {
     if (!hListView) return;
 
-    int listW = tabRect.right - tabRect.left - 20;
-    int availH = tabRect.bottom - tabRect.top - topOffset - bottomReserve;
+    // 列表统一放进内容卡片；清理页底部额外留出进度条的位置
+    int extraBottom = (hListView == g_hCleanList) ? UiScale(20) : 0;
+    UiPlaceListViewInCard(hListView, tabRect, extraBottom);
+    (void)topOffset;
+    (void)bottomReserve;
 
+    RECT listRect;
+    GetClientRect(hListView, &listRect);
+    int availH = listRect.bottom - listRect.top;
     if (availH <= 0) availH = 100;
-
-    SetWindowPos(hListView, NULL,
-        tabRect.left + 10, tabRect.top + topOffset,
-        listW, availH, SWP_NOZORDER);
 
     int itemCount = ListView_GetItemCount(hListView);
     if (itemCount <= 1) {

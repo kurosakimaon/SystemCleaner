@@ -344,6 +344,9 @@ std::vector<std::wstring> FindMatchingSubDirs(const std::wstring& baseDir,
         do {
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
                 if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+                // 跳过符号链接/junction：否则 Cache 之类的链接会把扫描/清理
+                // 带到用户数据目录，删除目标完全在预期目录之外
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
                 traverse(currentDir + L"\\" + fd.cFileName, depth + 1);
             }
         } while (FindNextFileW(hFind, &fd));
