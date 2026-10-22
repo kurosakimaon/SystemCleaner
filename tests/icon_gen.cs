@@ -195,15 +195,14 @@ public static class SCIcon {
     }
 
     public static void Main(string[] args) {
-        if (args.Length < 3) {
-            Console.WriteLine("usage: icon_gen <ico> <smallIco> <previewDir>");
+        if (args.Length < 2) {
+            Console.WriteLine("usage: icon_gen <ico> <previewDir>");
             return;
         }
         var sizes = new[] { 16, 24, 32, 48, 64, 128, 256 };
         SaveIco(args[0], sizes);
-        SaveIco(args[1], sizes);
-        SavePng(Path.Combine(args[2], "_new_icon_preview.png"), 512);
-        SavePng(Path.Combine(args[2], "_new_icon_32.png"), 32);
+        SavePng(Path.Combine(args[1], "_new_icon_preview.png"), 512);
+        SavePng(Path.Combine(args[1], "_new_icon_32.png"), 32);
         Console.WriteLine("icons written");
     }
 }
