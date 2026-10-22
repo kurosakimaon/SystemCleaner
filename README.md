@@ -13,7 +13,7 @@
 | 右键菜单 | 浏览与清理文件 / 文件夹右键菜单注册项 |
 | 注册表清理 | 扫描无效注册表项，删除前自动用 `reg.exe` 导出 `.reg` 备份到 `reg_backup` 目录 |
 | 网络工具 | 网络诊断与配置辅助（WinINet / IP 相关操作） |
-| 强力卸载 | 读取已安装程序列表，支持常规卸载与卸载残留清理 |
+| 强力卸载 | 读取已安装程序列表，支持常规卸载与卸载残留清理；强卸会按安装目录注销右键 Shell 扩展与 App Paths，被 explorer 占用的 DLL 自动转入重启删除，不再误报失败 |
 | 实用工具 | 文件粉碎、系统信息、重复文件查找、进程管理、快捷方式修复、磁盘清理助手 |
 
 ## 技术栈
@@ -57,7 +57,7 @@ msbuild SystemCleaner.sln /p:Configuration=Release /p:Platform=x64 /m
 | 脚本 | 内容 |
 | --- | --- |
 | `build_baseline.cmd` | 编译并运行 `baseline_tests.cpp`，336 项基础逻辑断言 |
-| `build_functional.cmd` | 编译并运行 `functional_tests.cpp`，246 项真实文件系统 / 注册表 / 进程行为断言 |
+| `build_functional.cmd` | 编译并运行 `functional_tests.cpp`，273 项真实文件系统 / 注册表 / 进程行为断言 |
 | `build_gui.cmd` | 编译并运行 `gui_tests.cpp`，1126 项 GUI 交互断言（控制台子系统，非提权运行） |
 | `build_icon.cmd` | 用 `icon_gen.cs` 重新生成应用图标 |
 | `build_app.cmd <配置> <平台>` | 用 msbuild 编译主工程，例如 `build_app.cmd Release x64` |

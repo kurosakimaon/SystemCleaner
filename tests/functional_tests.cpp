@@ -1153,6 +1153,123 @@ static void Test_UninstallPredicates() {
         "第三方目录下的驱动不应判为系统组件");
 }
 
+// ====================== 7.1 Shell 扩展 / App Paths 残留清理 ======================
+
+static void Test_UninstallShellExtCleanup() {
+    GROUP("FUNC-UNINSTALLEXT 安装目录关联的 Shell 扩展/App Paths");
+
+    std::wstring installDir = TempPath(L"ext\\7-Zip");
+    MakeDirs(installDir);
+    std::wstring dll = installDir + L"\\7-zip.dll";
+    WriteBytes(dll, "MZ", 2);
+
+    std::wstring classesRoot = g_regRoot + L"\\Classes";
+    const wchar_t* fakeGuid = L"{23170F69-40C1-278A-1000-000100020000}";
+    const wchar_t* localGuid = L"{22222222-3333-4444-5555-666666666666}";
+    const wchar_t* otherGuid = L"{11111111-2222-3333-4444-555555555555}";
+
+    std::wstring clsIn = classesRoot + L"\\CLSID\\" + fakeGuid;
+    CHECK_MSG(RegSetString(HKEY_CURRENT_USER, clsIn + L"\\InprocServer32", NULL, dll),
+        "应能写入测试 InprocServer32");
+    std::wstring clsLocal = classesRoot + L"\\CLSID\\" + localGuid;
+    CHECK_MSG(RegSetString(HKEY_CURRENT_USER, clsLocal + L"\\LocalServer32", NULL,
+        L"\"" + installDir + L"\\7zFM.exe\" /Automation"),
+        "应能写入带引号与参数的 LocalServer32");
+
+    std::wstring otherDir = TempPath(L"ext\\Other");
+    MakeDirs(otherDir);
+    std::wstring otherDll = otherDir + L"\\other.dll";
+    WriteBytes(otherDll, "MZ", 2);
+    std::wstring clsOut = classesRoot + L"\\CLSID\\" + otherGuid;
+    CHECK_MSG(RegSetString(HKEY_CURRENT_USER, clsOut + L"\\InprocServer32", NULL, otherDll),
+        "应能写入无关 CLSID");
+
+    std::wstring handlerParent = classesRoot + L"\\*\\shellex\\ContextMenuHandlers";
+    std::wstring handlerKey = handlerParent + L"\\7-Zip";
+    CHECK_MSG(RegSetString(HKEY_CURRENT_USER, handlerKey, NULL, fakeGuid),
+        "应能写入右键 handler 引用");
+    std::wstring otherHandler = handlerParent + L"\\Other";
+    CHECK_MSG(RegSetString(HKEY_CURRENT_USER, otherHandler, NULL, otherGuid),
+        "应能写入无关 handler");
+
+    // 容器键/根键绝不能成为递归删除目标
+    CHECK_MSG(!DeleteClassesSubkeyExact(HKEY_CURRENT_USER, classesRoot, KEY_WOW64_64KEY),
+        "Classes 根必须拒绝删除");
+    CHECK_MSG(!DeleteClassesSubkeyExact(HKEY_CURRENT_USER, classesRoot + L"\\CLSID", KEY_WOW64_64KEY),
+        "CLSID 容器必须拒绝删除");
+    CHECK_MSG(!DeleteClassesSubkeyExact(HKEY_CURRENT_USER, handlerParent, KEY_WOW64_64KEY),
+        "ContextMenuHandlers 容器必须拒绝删除");
+    CHECK_MSG(RegKeyExists(HKEY_CURRENT_USER, classesRoot), "拒绝后 Classes 根必须仍在");
+    CHECK_MSG(RegKeyExists(HKEY_CURRENT_USER, handlerParent), "拒绝后 handler 容器必须仍在");
+
+    std::set<std::wstring> removed;
+    CleanShellExtensionsAtRoot(HKEY_CURRENT_USER, classesRoot, installDir, &removed);
+    CHECK_MSG(removed.size() == 2 && removed.count(fakeGuid) && removed.count(localGuid),
+        "只应识别指向安装目录的 CLSID");
+    CHECK_MSG(!RegKeyExists(HKEY_CURRENT_USER, clsIn), "孤儿 InprocServer32 CLSID 必须删除");
+    CHECK_MSG(!RegKeyExists(HKEY_CURRENT_USER, clsLocal), "孤儿 LocalServer32 CLSID 必须删除");
+    CHECK_MSG(!RegKeyExists(HKEY_CURRENT_USER, handlerKey), "引用孤儿 CLSID 的右键 handler 必须删除");
+    CHECK_MSG(RegKeyExists(HKEY_CURRENT_USER, clsOut), "其它目录的 CLSID 不得误删");
+    CHECK_MSG(RegKeyExists(HKEY_CURRENT_USER, otherHandler), "无关 handler 不得误删");
+
+    // App Paths：默认值匹配 + Path 值匹配 + 无关项保留
+    std::wstring appPathsRoot = g_regRoot + L"\\App Paths";
+    std::wstring appByName = appPathsRoot + L"\\7zFM.exe";
+    CHECK_MSG(RegSetString(HKEY_CURRENT_USER, appByName, NULL, installDir + L"\\7zFM.exe"),
+        "应能写入 App Paths 默认值");
+    std::wstring appByPath = appPathsRoot + L"\\7zG.exe";
+    CHECK_MSG(RegSetString(HKEY_CURRENT_USER, appByPath, NULL, L"C:\\Windows\\notepad.exe"),
+        "应能写入无关默认值");
+    CHECK_MSG(RegSetString(HKEY_CURRENT_USER, appByPath, L"Path", installDir),
+        "应能写入指向安装目录的 Path 值");
+    std::wstring appOther = appPathsRoot + L"\\notepad.exe";
+    CHECK_MSG(RegSetString(HKEY_CURRENT_USER, appOther, NULL, L"C:\\Windows\\notepad.exe"),
+        "应能写入无关 App Paths 项");
+
+    CleanAppPathsForInstallDir(HKEY_CURRENT_USER, appPathsRoot, installDir);
+    CHECK_MSG(!RegKeyExists(HKEY_CURRENT_USER, appByName), "默认值指向安装目录的 App Paths 必须删除");
+    CHECK_MSG(!RegKeyExists(HKEY_CURRENT_USER, appByPath), "Path 值指向安装目录的 App Paths 必须删除");
+    CHECK_MSG(RegKeyExists(HKEY_CURRENT_USER, appOther), "无关 App Paths 不得误删");
+
+    RemoveTree(TempPath(L"ext"));
+}
+
+// ====================== 7.2 被占用文件的重启删除 ======================
+
+static void Test_UninstallLockedFile() {
+    GROUP("FUNC-UNINSTALLOCK 占用文件延迟删除");
+
+    std::wstring dir = TempPath(L"locked");
+    MakeDir(dir);
+    std::wstring file = dir + L"\\locked.dll";
+    WriteBytes(file, "MZ", 2);
+
+    // share=0：模拟 explorer.exe 映射中的 shell 扩展 DLL，运行期不可删除
+    HANDLE h = CreateFileW(file.c_str(), GENERIC_READ, 0, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    CHECK_MSG(h != INVALID_HANDLE_VALUE, "应能独占打开测试文件");
+    if (h == INVALID_HANDLE_VALUE) return;
+
+    ResetUninstallPendingReboot();
+    CHECK_MSG(GetUninstallPendingRebootCount() == 0, "重置后等待重启计数应为 0");
+
+    bool deleted = DeleteDirectoryRecursive(dir);
+    int pending = GetUninstallPendingRebootCount();
+    if (IsRunAsAdmin()) {
+        // 管理员才能写 PendingFileRenameOperations：占用文件应转为「等待重启」
+        CHECK_MSG(deleted, "管理员下被占用文件应登记重启删除并返回成功");
+        CHECK_MSG(pending > 0, "必须记录等待重启的文件/目录");
+    }
+    else {
+        CHECK_MSG(!deleted, "无法登记重启删除时应如实返回失败，不得虚报成功");
+        CHECK_MSG(pending == 0, "登记失败时等待重启计数必须为 0");
+    }
+
+    CloseHandle(h);
+    RemoveTree(dir);
+    ResetUninstallPendingReboot();
+}
+
 // ====================== 7.5 卸载模块真实扫描（只读） ======================
 
 static void Test_UninstallScan() {
@@ -1527,6 +1644,8 @@ int main() {
     Test_ContextMenu();
     Test_HostsFile();
     Test_UninstallPredicates();
+    Test_UninstallShellExtCleanup();
+    Test_UninstallLockedFile();
     Test_UninstallScan();
     Test_ToolsSystemInfo();
     Test_ToolsDuplicate();

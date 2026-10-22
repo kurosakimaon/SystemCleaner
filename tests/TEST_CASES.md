@@ -2,13 +2,13 @@
 
 > 自测方式：
 > - **UT**：`tests/baseline_tests.cpp`（控制台工程，直接包含 `utils.cpp` 被测源码，可自动化运行，336 项断言）
-> - **FUNC**：`tests/functional_tests.cpp`（真实文件系统 / HKCU 注册表 / 进程与快捷方式行为测试，246 项断言，测试数据自动清理）
+> - **FUNC**：`tests/functional_tests.cpp`（真实文件系统 / HKCU 注册表 / 进程与快捷方式行为测试，273 项断言，测试数据自动清理）
 > - **GUI**：`tests/gui_tests.cpp`（控制台宿主进程，真实创建主窗口，驱动 Tab 显隐矩阵、按钮命令流转、`WM_*_DONE` 64 位消息解析、网络测速完整流程、强力卸载护栏、注册表清理护栏等交互，1126 项断言）。编译期用宏把 `MessageBoxW` 替换为桩函数消除模态阻塞，可在非提升环境自动化运行。
 > - **静态**：源码走查 + 编译诊断（发现即修复）
 > - **UI**：需管理员权限手工验证的破坏性操作（真正卸载/清理/粉碎），标注为 `MANUAL`
 >
 > 编译验证：Release|x64、Release|Win32、Debug|x64、Debug|Win32 四个配置全部 0 error。
-> 自动化回归：`baseline_tests.exe` → **Total: 336  Failed: 0**；`functional_tests.exe` → **Total: 246  Failed: 0**；`gui_tests.exe` → **Total: 1126  Failed: 0**
+> 自动化回归：`baseline_tests.exe` → **Total: 336  Failed: 0**；`functional_tests.exe` → **Total: 273  Failed: 0**；`gui_tests.exe` → **Total: 1126  Failed: 0**
 
 ## 1. 安全护栏（最高优先级 —— 误删系统文件即致命）
 
@@ -208,7 +208,7 @@
 | BLD-04 | Debug \| Win32 | 0 error | 编译 | ✅ `Debug\SystemCleaner.exe` |
 | BLD-05 | `baseline_tests.exe` 自动化回归 | Failed = 0 | UT | ✅ Total 336 / Failed 0 |
 | BLD-06 | `gui_tests.exe` GUI 交互自动化回归 | Failed = 0 | GUI | ✅ Total 1126 / Failed 0 |
-| BLD-07 | `functional_tests.exe` 功能行为回归 | Failed = 0 | FUNC | ✅ Total 246 / Failed 0 |
+| BLD-07 | `functional_tests.exe` 功能行为回归 | Failed = 0 | FUNC | ✅ Total 273 / Failed 0 |
 
 ## 11. GUI 交互自动化（`gui_tests.exe`，真实窗口驱动）
 
@@ -276,6 +276,21 @@
 | GUI-REGCLEAN-07 | `WM_REG_SCAN_DONE(wParam=2,lParam=0)` | 列表 2 行且与数据一一对应，状态栏含「2」 | ✅ |
 | GUI-REGCLEAN-08 | `WM_REG_SCAN_DONE(lParam=1)` 权限不足 | 弹一次提示，**不清空**已有列表与数据 | ✅（原 FAIL：扫描线程先 `clear` 再判权限，普通权限点一次扫描就把上次结果抹掉） |
 
+### 11d. 强卸 Shell 扩展 / 占用文件（本轮新增，`functional_tests.exe`）
+
+> 复现 7-Zip 强卸场景：DLL 被 explorer 映射时删除失败、右键菜单残留孤儿 CLSID、
+> 卸载器名与安装目录名不一致导致 App Paths 漏删。测试在 `HKCU\Software\SystemCleanerFuncTest_*`
+> 下构造同名结构，不触碰真实文件关联。
+
+| 编号 | 用例 | 预期 | 结果 |
+|---|---|---|---|
+| FUNC-UNINSTALLEXT-01 | `InprocServer32` / 带引号与参数的 `LocalServer32` 指向安装目录 | 精确识别这两个 CLSID | ✅ |
+| FUNC-UNINSTALLEXT-02 | 删除 CLSID 与引用它的 `ContextMenuHandlers` | 孤儿 CLSID 与 handler 均被删除 | ✅ |
+| FUNC-UNINSTALLEXT-03 | 其它目录的 CLSID / 无关 handler | 原样保留，不误删 | ✅ |
+| FUNC-UNINSTALLEXT-04 | 目标为 `Classes` 根、`CLSID`/`ContextMenuHandlers` 容器 | 一律拒绝删除 | ✅ |
+| FUNC-UNINSTALLEXT-05 | App Paths 默认值 / `Path` 值指向安装目录（`7zFM.exe`） | 均被删除；无关项保留 | ✅ |
+| FUNC-UNINSTALLOCK-01 | 独占打开（share=0）的 DLL 所在目录递归删除 | 管理员：登记重启删除并返回成功；非管理员：如实返回失败且不虚报等待重启 | ✅ |
+
 ## 12. 本轮修复的真实缺陷（源码走查 + GUI 验证）
 
 | 编号 | 缺陷 | 影响 | 修复 |
@@ -306,6 +321,8 @@
 | FIX-17 | `IsSystemComponentImagePath` 不认设备前缀、不解析引号 | `\??\C:\Program Files\App\x.sys` 这类第三方驱动被误判为「Windows 自带组件」，用户无法清理；反之相对路径判定也不稳 | 统一委托 `ResolveDriverFilePath` 解析后再与真实 Windows 目录做整段前缀比较 |
 | FIX-18 | `ResolveDriverFilePath` 定义在 `uninstaller.cpp` 内 | `utils.cpp` 侧的 `IsSystemComponentImagePath` 无法复用，形成重复实现 | 迁移到 `utils.cpp`，`uninstaller.cpp` 改为调用 |
 | FIX-19 | 注册表侧没有递归删除总闸（目录侧有 `IsSafeToDeleteDirectory`） | `DeleteRegistryKeyRecursive` / `RecursiveDeleteKeyEx` 拿到 `SOFTWARE`、`SYSTEM\CurrentControlSet\Services` 等容器键时会 `RegDeleteTreeW` 抹掉整棵子树（等价于重装系统） | 新增 `IsSafeToDeleteRegistryKey(hive, keyPath)`：归一化后按段比较 HKLM/HKCU 受保护容器键名单，两个删除入口均先过闸 |
+| FIX-34 | 被 explorer 映射的 shell 扩展 DLL 删除失败被记为「卸载失败」 | 强卸 7-Zip 后目录只剩 `7-zip.dll`，用户看到失败提示；实际全部可删项已删完 | `DeleteDirectoryRecursiveDepth` 对共享冲突调用 `MoveFileExW(MOVEFILE_DELAY_UNTIL_REBOOT)` 登记重启删除，计为「等待重启」而非失败；完成弹窗单独提示需重启 |
+| FIX-35 | 强卸只删安装目录/Uninstall 键，不注销 Shell 扩展与 App Paths | 右键菜单残留 7-Zip 条目，点击报错；`App Paths\7zFM.exe` 因卸载器名与目录名不一致而漏删 | 新增按安装目录匹配：扫描 HKLM/HKCU `Classes\CLSID` 的 `InprocServer32`/`LocalServer32`，删除对应 CLSID、`ContextMenuHandlers`/`DragDropHandlers` 引用与 `Approved` 值；App Paths 按默认值与 `Path` 值归属删除 |
 
 ## 14. 本轮修复的真实缺陷（注册表清理专项审计）
 

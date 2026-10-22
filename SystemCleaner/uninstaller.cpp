@@ -3,6 +3,7 @@
 #include "common.h"
 #include <fstream>
 #include <string>
+#include <set>
 #include <cwctype>
 #include <cstring>
 
@@ -34,6 +35,49 @@ static void ClearUninstallFailures() {
     EnterCriticalSection(&UninstallFailuresLock());
     g_uninstallFailures.clear();
     LeaveCriticalSection(&UninstallFailuresLock());
+}
+
+// ====================== 重启后删除队列（线程安全） ======================
+//
+// 被 explorer.exe 加载的 shell 扩展 DLL（如 7-zip.dll）在进程存活期间
+// DeleteFileW 必定返回共享冲突；原实现把它当硬失败，用户看到「卸载失败」，
+// 实际上只差一个被映射的文件。MoveFileExW(MOVEFILE_DELAY_UNTIL_REBOOT)
+// 把删除登记到 PendingFileRenameOperations，系统重启时完成。
+// 这些路径计为「等待重启」，不参与失败计数。
+static CRITICAL_SECTION& PendingRebootLock() {
+    static CRITICAL_SECTION cs = [] {
+        CRITICAL_SECTION c;
+        InitializeCriticalSection(&c);
+        return c;
+    }();
+    return cs;
+}
+
+static std::vector<std::wstring> g_pendingRebootPaths;
+
+static void ResetUninstallPendingReboot() {
+    EnterCriticalSection(&PendingRebootLock());
+    g_pendingRebootPaths.clear();
+    LeaveCriticalSection(&PendingRebootLock());
+}
+
+int GetUninstallPendingRebootCount() {
+    EnterCriticalSection(&PendingRebootLock());
+    int count = (int)g_pendingRebootPaths.size();
+    LeaveCriticalSection(&PendingRebootLock());
+    return count;
+}
+
+static bool ScheduleDeleteOnReboot(const std::wstring& path) {
+    if (path.empty()) return false;
+    if (!MoveFileExW(path.c_str(), NULL, MOVEFILE_DELAY_UNTIL_REBOOT)) return false;
+
+    EnterCriticalSection(&PendingRebootLock());
+    bool exists = std::find(g_pendingRebootPaths.begin(), g_pendingRebootPaths.end(), path)
+        != g_pendingRebootPaths.end();
+    if (!exists) g_pendingRebootPaths.push_back(path);
+    LeaveCriticalSection(&PendingRebootLock());
+    return true;
 }
 
 // 扫描线程代际：每个扫描线程启动时记录自己的 generation，
@@ -398,11 +442,329 @@ static void CleanAppPathsEntry(const std::wstring& exeName) {
     }
 }
 
+// ====================== 安装目录关联的 Shell 扩展清理 ======================
+//
+// 7-Zip 这类软件把右键菜单注册成 ContextMenuHandlers -> CLSID ->
+// InprocServer32=安装目录\xxx.dll。强制卸载删掉目录与 Uninstall 键后，
+// CLSID/handler 仍是孤儿：右键菜单照常显示，点下去因为 DLL 不存在而报错。
+// 这里按「服务端路径位于安装目录内」精确识别 CLSID，只删这些 CLSID
+// 及引用它们的 handler，绝不触碰 SOFTWARE\Classes 下的其它内容。
+
+static std::wstring TrimSpaces(const std::wstring& s) {
+    size_t b = s.find_first_not_of(L" \t\r\n");
+    if (b == std::wstring::npos) return L"";
+    size_t e = s.find_last_not_of(L" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
+
+static std::wstring UpperCopy(std::wstring s) {
+    for (auto& c : s) c = (wchar_t)towupper(c);
+    return s;
+}
+
+static std::wstring RegReadStringExpanding(HKEY hKey, const wchar_t* valueName) {
+    wchar_t data[2048] = { 0 };
+    DWORD dataSize = sizeof(data);
+    DWORD type = 0;
+    if (RegQueryValueExW(hKey, valueName, NULL, &type, (LPBYTE)data, &dataSize) != ERROR_SUCCESS) {
+        return L"";
+    }
+    if (type != REG_SZ && type != REG_EXPAND_SZ) return L"";
+    data[_countof(data) - 1] = 0;
+    std::wstring value(data);
+    if (type == REG_EXPAND_SZ) {
+        std::wstring expanded;
+        if (ExpandEnvVars(value, expanded)) value = expanded;
+    }
+    return value;
+}
+
+// InprocServer32 默认值通常是 DLL 路径；LocalServer32 可能是
+// "C:\App\app.exe" /Automation。去掉包裹引号后按安装目录前缀判断。
+static std::wstring NormalizeServerPath(std::wstring value) {
+    value = TrimSpaces(value);
+    if (value.empty()) return L"";
+    if (value.front() == L'"') {
+        size_t q = value.find(L'"', 1);
+        value = (q == std::wstring::npos) ? value.substr(1) : value.substr(1, q - 1);
+        value = TrimSpaces(value);
+    }
+    return value;
+}
+
+static bool IsClsidKeyName(const std::wstring& name) {
+    if (name.size() != 38 || name.front() != L'{' || name.back() != L'}') return false;
+    for (size_t i = 1; i < 37; i++) {
+        if (i == 9 || i == 14 || i == 19 || i == 24) {
+            if (name[i] != L'-') return false;
+        }
+        else if (!iswxdigit(name[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// 只允许删除「CLSID\{GUID}」或「...\shellex\...\具体handler名」这类精确目标；
+// 传入 Classes 根、CLSID 容器、ContextMenuHandlers 容器时一律拒绝，
+// 防止复用本函数时把整棵文件关联子树删掉。
+static bool IsValidClassesCleanupTarget(const std::wstring& path) {
+    std::wstring lower;
+    lower.reserve(path.size());
+    for (wchar_t c : path) lower += (wchar_t)towlower(c);
+
+    std::wstring last = lower;
+    size_t slash = last.find_last_of(L'\\');
+    last = (slash == std::wstring::npos) ? last : last.substr(slash + 1);
+    if (last.empty()) return false;
+
+    size_t clsidPos = lower.find(L"\\clsid\\");
+    if (clsidPos != std::wstring::npos) {
+        return IsClsidKeyName(path.substr(clsidPos + 7));
+    }
+
+    if (lower.find(L"\\shellex\\") == std::wstring::npos) return false;
+    static const wchar_t* containers[] = {
+        L"classes", L"clsid", L"shellex", L"contextmenuhandlers",
+        L"dragdrophandlers", L"propertysheethandlers", L"*", L"directory",
+        L"background", L"folder", L"drive", L"allfilesystemobjects",
+    };
+    for (const auto* c : containers) {
+        if (last == c) return false;
+    }
+    return true;
+}
+
+static bool DeleteSubkeyExact(HKEY hive, const std::wstring& keyPath, REGSAM view) {
+    size_t sep = keyPath.find_last_of(L'\\');
+    if (sep == std::wstring::npos || sep == 0) return false;
+    std::wstring parentPath = keyPath.substr(0, sep);
+    std::wstring name = keyPath.substr(sep + 1);
+    if (name.empty()) return false;
+
+    HKEY hParent = NULL;
+    LONG ret = RegOpenKeyExW(hive, parentPath.c_str(), 0, KEY_READ | KEY_WRITE | view, &hParent);
+    if (ret != ERROR_SUCCESS && view != 0) {
+        ret = RegOpenKeyExW(hive, parentPath.c_str(), 0, KEY_READ | KEY_WRITE, &hParent);
+    }
+    if (ret != ERROR_SUCCESS) return false;
+
+    ret = RegDeleteTreeW(hParent, name.c_str());
+    RegCloseKey(hParent);
+    return ret == ERROR_SUCCESS || ret == ERROR_FILE_NOT_FOUND || ret == ERROR_PATH_NOT_FOUND;
+}
+
+static bool DeleteClassesSubkeyExact(HKEY hive, const std::wstring& keyPath, REGSAM view) {
+    if (!IsValidClassesCleanupTarget(keyPath)) return false;
+    return DeleteSubkeyExact(hive, keyPath, view);
+}
+
+static void CollectShellExtClsids(HKEY hive, const std::wstring& classesRoot,
+    const std::wstring& installLocation, std::set<std::wstring>& out) {
+    if (installLocation.empty()) return;
+
+    const std::wstring clsidRoot = classesRoot + L"\\CLSID";
+    for (REGSAM view : { KEY_WOW64_64KEY, KEY_WOW64_32KEY }) {
+        HKEY hRoot = NULL;
+        if (RegOpenKeyExW(hive, clsidRoot.c_str(), 0, KEY_READ | view, &hRoot) != ERROR_SUCCESS) continue;
+
+        wchar_t name[64] = { 0 };
+        DWORD index = 0;
+        while (true) {
+            DWORD nameLen = _countof(name);
+            LONG ret = RegEnumKeyExW(hRoot, index, name, &nameLen, NULL, NULL, NULL, NULL);
+            if (ret == ERROR_NO_MORE_ITEMS) break;
+            if (ret != ERROR_SUCCESS) { index++; continue; }
+            index++;
+
+            std::wstring clsid(name, nameLen);
+            if (!IsClsidKeyName(clsid)) continue;
+
+            for (const wchar_t* server : { L"InprocServer32", L"LocalServer32" }) {
+                HKEY hServer = NULL;
+                std::wstring sub = clsid + L"\\" + server;
+                if (RegOpenKeyExW(hRoot, sub.c_str(), 0, KEY_READ, &hServer) != ERROR_SUCCESS) continue;
+                std::wstring raw = RegReadStringExpanding(hServer, NULL);
+                RegCloseKey(hServer);
+
+                std::wstring serverPath = NormalizeServerPath(raw);
+                if (!serverPath.empty() && IsPathUnderDirectory(serverPath, installLocation)) {
+                    out.insert(UpperCopy(clsid));
+                    break;
+                }
+            }
+        }
+        RegCloseKey(hRoot);
+    }
+}
+
+static void CleanShellExtHandlers(HKEY hive, const std::wstring& classesRoot,
+    const std::set<std::wstring>& clsids) {
+    if (clsids.empty()) return;
+
+    static const wchar_t* handlerParents[] = {
+        L"*\\shellex\\ContextMenuHandlers",
+        L"Directory\\shellex\\ContextMenuHandlers",
+        L"Directory\\Background\\shellex\\ContextMenuHandlers",
+        L"Folder\\shellex\\ContextMenuHandlers",
+        L"Drive\\shellex\\ContextMenuHandlers",
+        L"AllFilesystemObjects\\shellex\\ContextMenuHandlers",
+        L"*\\shellex\\DragDropHandlers",
+        L"Directory\\shellex\\DragDropHandlers",
+        L"Folder\\shellex\\DragDropHandlers",
+        L"*\\shellex\\PropertySheetHandlers",
+        L"Folder\\shellex\\PropertySheetHandlers",
+    };
+
+    for (const wchar_t* parent : handlerParents) {
+        for (REGSAM view : { KEY_WOW64_64KEY, KEY_WOW64_32KEY }) {
+            std::wstring parentPath = classesRoot + L"\\" + parent;
+            HKEY hParent = NULL;
+            if (RegOpenKeyExW(hive, parentPath.c_str(), 0, KEY_READ | view, &hParent) != ERROR_SUCCESS) continue;
+
+            // 先收集再删除：边枚举边删会让后续子键索引前移，漏掉一半目标
+            std::vector<std::wstring> matches;
+            wchar_t name[256] = { 0 };
+            DWORD index = 0;
+            while (true) {
+                DWORD nameLen = _countof(name);
+                LONG ret = RegEnumKeyExW(hParent, index, name, &nameLen, NULL, NULL, NULL, NULL);
+                if (ret == ERROR_NO_MORE_ITEMS) break;
+                if (ret != ERROR_SUCCESS) { index++; continue; }
+                index++;
+
+                HKEY hHandler = NULL;
+                if (RegOpenKeyExW(hParent, name, 0, KEY_READ, &hHandler) != ERROR_SUCCESS) continue;
+                std::wstring data = UpperCopy(TrimSpaces(RegReadStringExpanding(hHandler, NULL)));
+                RegCloseKey(hHandler);
+
+                if (clsids.count(data) != 0) matches.push_back(std::wstring(name, nameLen));
+            }
+            RegCloseKey(hParent);
+
+            for (const auto& handlerName : matches) {
+                DeleteClassesSubkeyExact(hive, parentPath + L"\\" + handlerName, view);
+            }
+        }
+    }
+}
+
+static void CleanApprovedShellExtensions(HKEY hive, const std::set<std::wstring>& clsids) {
+    static const wchar_t* approvedPath =
+        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Shell Extensions\\Approved";
+
+    for (REGSAM view : { KEY_WOW64_64KEY, KEY_WOW64_32KEY }) {
+        HKEY hKey = NULL;
+        if (RegOpenKeyExW(hive, approvedPath, 0, KEY_READ | KEY_WRITE | view, &hKey) != ERROR_SUCCESS) continue;
+        for (const auto& clsid : clsids) {
+            RegDeleteValueW(hKey, clsid.c_str());
+        }
+        RegCloseKey(hKey);
+    }
+}
+
+static void CleanShellExtensionsWithClsids(HKEY hive, const std::wstring& classesRoot,
+    const std::set<std::wstring>& clsids) {
+    if (clsids.empty()) return;
+
+    CleanShellExtHandlers(hive, classesRoot, clsids);
+    for (const auto& clsid : clsids) {
+        std::wstring key = classesRoot + L"\\CLSID\\" + clsid;
+        DeleteClassesSubkeyExact(hive, key, KEY_WOW64_64KEY);
+        DeleteClassesSubkeyExact(hive, key, KEY_WOW64_32KEY);
+    }
+}
+
+// 测试入口：在临时 Classes 根上复用同一套识别/删除逻辑
+static void CleanShellExtensionsAtRoot(HKEY hive, const std::wstring& classesRoot,
+    const std::wstring& installLocation, std::set<std::wstring>* removedOut = NULL) {
+    std::set<std::wstring> clsids;
+    CollectShellExtClsids(hive, classesRoot, installLocation, clsids);
+    if (clsids.empty()) return;
+
+    CleanShellExtensionsWithClsids(hive, classesRoot, clsids);
+    if (removedOut) *removedOut = clsids;
+}
+
+static void CleanShellExtensionsForInstallDir(const std::wstring& installLocation) {
+    if (installLocation.empty()) return;
+
+    // 先合并两个 hive 的 CLSID：handler 与 CLSID 不一定写在同一个 hive，
+    // 只按各自 hive 清理会漏掉「HKCU handler -> HKLM CLSID」这类组合
+    std::set<std::wstring> clsids;
+    CollectShellExtClsids(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Classes", installLocation, clsids);
+    CollectShellExtClsids(HKEY_CURRENT_USER, L"SOFTWARE\\Classes", installLocation, clsids);
+    if (clsids.empty()) return;
+
+    for (HKEY hive : { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER }) {
+        CleanShellExtensionsWithClsids(hive, L"SOFTWARE\\Classes", clsids);
+        CleanApprovedShellExtensions(hive, clsids);
+    }
+}
+
+/**
+ * @brief 按安装目录清理 App Paths（如 7-Zip 的 7zFM.exe）
+ *        原实现用「安装目录最后一段 + .exe」猜名字，7-Zip 装成 7-Zip 目录、
+ *        程序叫 7zFM.exe，永远匹配不到，留下死掉的 App Paths 项。
+ */
+static void CleanAppPathsForInstallDir(HKEY hive, const std::wstring& appPathsRoot,
+    const std::wstring& installLocation) {
+    if (installLocation.empty() || appPathsRoot.empty()) return;
+
+    for (REGSAM view : { KEY_WOW64_64KEY, KEY_WOW64_32KEY }) {
+        HKEY hRoot = NULL;
+        if (RegOpenKeyExW(hive, appPathsRoot.c_str(), 0, KEY_READ | view, &hRoot) != ERROR_SUCCESS) continue;
+
+        std::vector<std::wstring> matches;
+        wchar_t name[256] = { 0 };
+        DWORD index = 0;
+        while (true) {
+            DWORD nameLen = _countof(name);
+            LONG ret = RegEnumKeyExW(hRoot, index, name, &nameLen, NULL, NULL, NULL, NULL);
+            if (ret == ERROR_NO_MORE_ITEMS) break;
+            if (ret != ERROR_SUCCESS) { index++; continue; }
+            index++;
+
+            HKEY hSub = NULL;
+            if (RegOpenKeyExW(hRoot, name, 0, KEY_READ, &hSub) != ERROR_SUCCESS) continue;
+
+            bool match = false;
+            std::wstring exe = NormalizeServerPath(RegReadStringExpanding(hSub, NULL));
+            if (!exe.empty() && IsPathUnderDirectory(exe, installLocation)) match = true;
+            if (!match) {
+                std::wstring path = NormalizeServerPath(RegReadStringExpanding(hSub, L"Path"));
+                if (!path.empty() && IsPathUnderDirectory(path, installLocation)) match = true;
+            }
+            RegCloseKey(hSub);
+
+            if (match) matches.push_back(std::wstring(name, nameLen));
+        }
+        RegCloseKey(hRoot);
+
+        for (const auto& sub : matches) {
+            DeleteSubkeyExact(hive, appPathsRoot + L"\\" + sub, view);
+        }
+    }
+}
+
+static void CleanAppPathsForInstallLocation(const std::wstring& installLocation) {
+    if (installLocation.empty()) return;
+
+    static const wchar_t* roots[] = {
+        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths",
+        L"SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths",
+    };
+    for (HKEY hive : { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER }) {
+        for (const wchar_t* root : roots) {
+            CleanAppPathsForInstallDir(hive, root, installLocation);
+        }
+    }
+}
+
 /**
  * @brief Recursively delete a directory with retry for locked files
  */
-static bool DeleteDirectoryRecursiveDepth(const std::wstring& path, int depth) {
-    if (path.empty() || depth > 40 || !PathFileExistsW(path.c_str())) return true;
+static bool DeleteDirectoryRecursiveDepth(const std::wstring& path, int depth) {    if (path.empty() || depth > 40 || !PathFileExistsW(path.c_str())) return true;
     // 递归的每一层都重新判定：只挡顶层时，深层子目录若恰好是 junction 目标 /
     // 公共目录（如 AppData\Local\Microsoft）会被连带删掉
     if (!IsSafeToDeleteDirectory(path)) return false;
@@ -447,20 +809,30 @@ static bool DeleteDirectoryRecursiveDepth(const std::wstring& path, int depth) {
                 }
             }
             if (!deleted) {
-                success = false;
+                // 被 explorer/杀软映射的文件无法在运行期删除；登记重启删除，
+                // 该文件及其父目录不再计为失败（目录删除同样会登记到重启队列）
+                if (!ScheduleDeleteOnReboot(fullPath)) {
+                    success = false;
+                }
             }
         }
     } while (FindNextFileW(hFind, &fd));
     FindClose(hFind);
 
     if (success) {
+        bool removed = false;
         for (int r = 0; r < 3; r++) {
             if (r > 0) Sleep(200 * r);
             if (RemoveDirectoryW(path.c_str())) {
-                return true;
+                removed = true;
+                break;
             }
         }
-        success = false;
+        // 目录里还有被占用的文件时 RemoveDirectoryW 必然失败；
+        // 文件删除已登记到重启队列，目录也要按同样的方式登记。
+        if (!removed && !ScheduleDeleteOnReboot(path)) {
+            success = false;
+        }
     }
     return success;
 }
@@ -922,10 +1294,10 @@ static bool CleanDriverResiduals(const UninstallItem& item) {
         RemoveServiceByName(svcName);
     }
 
-    // 2. 删除驱动文件
+    // 2. 删除驱动文件（内核仍映射时登记重启删除，避免误报失败）
     std::wstring driverFile = ResolveDriverFilePath(item.imagePath);
     if (!driverFile.empty() && PathFileExistsW(driverFile.c_str())) {
-        if (!ForceDeleteFile(driverFile)) {
+        if (!ForceDeleteFile(driverFile) && !ScheduleDeleteOnReboot(driverFile)) {
             AddUninstallFailure(item.displayName, L"无法删除驱动文件: " + driverFile);
             success = false;
         }
@@ -982,9 +1354,17 @@ bool CleanAppResiduals(const UninstallItem& item, bool keepUserData) {
             ext.data(), (int)ext.size()) == 0 && name[0] != 0) {
             CleanAppPathsEntry(std::wstring(name.data()) + L".exe");
         }
+        // 名字猜不中的（7zFM.exe）按目标路径归属兜底
+        CleanAppPathsForInstallLocation(item.installLocation);
     }
 
-    // ===== 4. Delete install directory =====
+    // ===== 4. Unregister shell extensions installed under the app directory =====
+    // 必须赶在删目录之前：InprocServer32 仍指向目录内 DLL 时才能按归属识别
+    if (locUsable) {
+        CleanShellExtensionsForInstallDir(item.installLocation);
+    }
+
+    // ===== 5. Delete install directory =====
     if (!item.installLocation.empty() && PathFileExistsW(item.installLocation.c_str())) {
         // 保留用户数据时，位于用户配置目录内的安装目录不删
         bool underProfile = userProfile.empty() ? true
@@ -1005,7 +1385,7 @@ bool CleanAppResiduals(const UninstallItem& item, bool keepUserData) {
         }
     }
 
-    // ===== 5. Delete registry keys (both 32-bit and 64-bit views) =====
+    // ===== 6. Delete registry keys (both 32-bit and 64-bit views) =====
     if (!item.regKeyPath.empty()) {
         REGSAM viewAccess = item.regViewAccess ? item.regViewAccess : 0;
         bool regDeleted = DeleteRegistryKeyRecursive(item.regHive, item.regKeyPath, viewAccess);
@@ -1025,7 +1405,7 @@ bool CleanAppResiduals(const UninstallItem& item, bool keepUserData) {
         }
     }
 
-    // ===== 6. Clean shortcuts (desktop + start menu + quick launch) =====
+    // ===== 7. Clean shortcuts (desktop + start menu + quick launch) =====
     CleanDesktopShortcuts(item.displayName);
     CleanStartMenuShortcuts(item.displayName);
     CleanQuickLaunchShortcuts(item.displayName);
@@ -1044,7 +1424,7 @@ bool CleanAppResiduals(const UninstallItem& item, bool keepUserData) {
         }
     }
 
-    // ===== 7. Clean residual directories =====
+    // ===== 8. Clean residual directories =====
     if (!keepUserData) {
         std::vector<std::wstring> candidates;
         if (!item.publisher.empty()) candidates.push_back(item.publisher);
@@ -1142,6 +1522,7 @@ bool UninstallSingleApp(const UninstallItem& item, bool keepUserData) {
 DWORD WINAPI UninstallThreadProc(LPVOID lpParam) {
     HWND hWnd = (HWND)lpParam;
     ClearUninstallFailures();
+    ResetUninstallPendingReboot();
 
     std::vector<int> selectedIndices;
     EnterCriticalSection(&g_uninstallItemsLock);
@@ -1192,6 +1573,7 @@ DWORD WINAPI UninstallThreadProc(LPVOID lpParam) {
 DWORD WINAPI ForceUninstallThreadProc(LPVOID lpParam) {
     HWND hWnd = (HWND)lpParam;
     ClearUninstallFailures();
+    ResetUninstallPendingReboot();
 
     std::vector<int> selectedIndices;
     EnterCriticalSection(&g_uninstallItemsLock);

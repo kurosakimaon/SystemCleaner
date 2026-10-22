@@ -1313,15 +1313,20 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
         WriteUninstallFailureLog();
 
-        wchar_t msg[256];
+        int pendingCount = GetUninstallPendingRebootCount();
+        std::wstring msg;
         if (failCount > 0) {
-            swprintf_s(msg, L"卸载完成！\n成功卸载 %d 项，%d 项失败\n失败详情已保存到日志文件",
-                successCount, failCount);
+            msg = L"卸载完成！\n成功卸载 " + std::to_wstring(successCount) + L" 项，" +
+                std::to_wstring(failCount) + L" 项失败\n失败详情已保存到日志文件";
         }
         else {
-            swprintf_s(msg, L"卸载完成！\n成功卸载 %d 项", successCount);
+            msg = L"卸载完成！\n成功卸载 " + std::to_wstring(successCount) + L" 项";
         }
-        MessageBoxW(g_hMainWnd, msg, L"卸载完成", MB_OK | MB_ICONINFORMATION);
+        if (pendingCount > 0) {
+            msg += L"\n\n有 " + std::to_wstring(pendingCount) +
+                L" 个文件/目录正被系统占用，已安排在重启后自动删除。";
+        }
+        MessageBoxW(g_hMainWnd, msg.c_str(), L"卸载完成", MB_OK | MB_ICONINFORMATION);
 
         InitUninstallList();
         break;

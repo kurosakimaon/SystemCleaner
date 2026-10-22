@@ -388,6 +388,7 @@ bool UninstallSingleApp(const UninstallItem& item, bool keepUserData);
 bool CleanAppResiduals(const UninstallItem& item, bool keepUserData);
 int ExecuteUninstallCommand(const std::wstring& uninstallCmd);
 void WriteUninstallFailureLog();
+int GetUninstallPendingRebootCount();
 // 线程安全地追加一条卸载失败记录（多个工作线程会并发写 g_uninstallFailures）
 void AddUninstallFailure(const std::wstring& appName, const std::wstring& reason);
 
